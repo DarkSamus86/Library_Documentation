@@ -141,8 +141,15 @@ The Book Management System is the core module of the Library application. It pro
 
 #### 1.4.3 Card Payment Returns
 - Admin confirms returns for card-paid rentals
-- System automatically handles any outstanding fines
-- Remaining deposit is refunded to the user's card
+- Upon admin confirmation of return:
+  - System calculates any outstanding fines based on days overdue
+  - Fine is automatically charged to the user's saved card in a single transaction
+  - If card charge fails:
+    - User is notified via email
+    - Fine status becomes PENDING
+    - User must pay fine manually (cash or updated card)
+    - User cannot rent new books until fine is paid
+  - Remaining deposit is refunded to the user's card after fine deduction
 
 ### 1.5 Overdue and Fine System
 
@@ -194,13 +201,25 @@ Where:
 - User cannot rent new books until fine is paid
 
 #### 1.5.5 Fine Collection - Card Payment
-- Fine is automatically charged to the user's saved card
-- Daily charge: `dailyFine = fine / remainingDaysOverdue` (or full fine if single day)
-- If card charge fails:
-  - User is notified via email
-  - Retry charge next day
-  - After 3 consecutive failures, account is suspended
-- User can view fine history in their profile
+- Fine is NOT charged automatically on a daily basis
+- Fine is calculated and accumulated during the overdue period
+- Fine is charged ONLY when admin confirms the book return:
+  - Admin clicks "Confirm Return" in admin panel
+  - System calculates total fine based on days overdue
+  - System attempts to charge the full fine amount to the user's saved card
+  - Transaction is recorded in the system
+- If card charge fails due to insufficient funds or other card issues:
+  - **Automatic fallback to cash payment**: Fine payment method is switched from CARD to CASH
+  - Fine status becomes PENDING_CASH
+  - User is notified via email about:
+    - The failed card charge (with reason)
+    - The automatic switch to cash payment
+    - Available payment options
+  - User can pay the fine in two ways:
+    1. **Pay in cash at the library**: Visit the library, pay the fine in cash, admin confirms in system
+    2. **Update payment method in profile**: Log into account, add/update a card with sufficient funds, trigger payment from profile
+  - User cannot rent new books until fine is paid
+- User can view fine history, status, and payment options in their profile
 
 ### 1.6 Admin Features for Books
 
@@ -244,10 +263,27 @@ Where:
 - PDF viewer is embedded in the website
 - Download button is available only for purchased books
 
-#### 1.7.3 PDF Security
+#### 1.7.3 PDF Security - Anti-Piracy System
 - PDFs are not directly accessible via URL
 - Access is validated against user's rental/purchase records
-- Watermarking (optional): User's email/name is watermarked on PDF pages
+- **Anti-Piracy Watermarking**:
+  - When a user downloads a PDF, the system generates a unique anti-piracy code
+  - Code format: `LIB-{userId}-{bookId}-{timestamp}-{randomHash}`
+  - The code is embedded into the PDF file in multiple locations:
+    - Visible watermark on each page (user's email/name + code)
+    - Invisible metadata embedded in PDF properties
+    - Hidden text layer with the code (not visible when reading, but present in file)
+  - The anti-piracy code is recorded in the database:
+    - Table: `pdf_copies`
+    - Fields: code, userId, bookId, downloadDate, pdfFileHash, status
+  - If a pirated copy is found:
+    - Admin can extract the code from the PDF
+    - System looks up the code in the database
+    - Identifies the user who downloaded that specific copy
+    - Legal action can be taken against the user
+  - Each download generates a new unique copy with a new code
+  - PDF file hash is stored to verify integrity
+  - User cannot download the same PDF twice without generating a new code
 
 ---
 
@@ -373,10 +409,12 @@ Where:
 | Reminder notifications | High | Daily email for overdue books |
 | Fine calculation algorithm | High | Progressive fine system |
 | Fine entity/model | High | Store fine records |
-| Auto-charge fine (card) | High | Daily charge to saved card |
-| Fine payment (cash) | Medium | Admin confirmation |
+| Fine charge on return confirmation | High | Single charge when admin confirms return |
+| Fallback to cash on card failure | High | Auto-switch to cash if card charge fails |
+| Fine payment (cash) | Medium | Admin confirmation at return |
+| Fine payment via profile | Medium | User can update card and pay from profile |
 | Fine history | Medium | View fine history |
-| Account suspension for unpaid fines | Low | After 3 failed charges |
+| Account suspension for unpaid fines | Low | Until fine is paid |
 
 ### 3.7 Admin Book Statistics
 | Feature | Priority | Notes |
@@ -393,7 +431,10 @@ Where:
 | PDF access control | High | Based on rental/purchase |
 | PDF viewer | Medium | Web-based reader |
 | PDF download | Medium | For purchased books only |
-| PDF watermarking | Low | User identification |
+| Anti-piracy watermarking | High | Visible + invisible watermarks |
+| Unique code generation | High | Per-download unique code |
+| Code storage in database | High | Track who downloaded which copy |
+| Pirated copy identification | Medium | Extract code to find source |
 
 ### 3.9 Receipt & Barcode System
 | Feature | Priority | Notes |
@@ -456,7 +497,16 @@ Where:
 | GET | `/admin/books/{id}/rentals/count` | Admin | Total rentals count |
 | GET | `/admin/books/{id}/rentals/users` | Admin | Users who rented |
 | GET | `/admin/rentals/overdue` | Admin | All overdue rentals |
-| POST | `/admin/fines/{id}/collect` | Admin | Collect fine manually |
+| POST | `/admin/fines/{id}/collect` | Admin | Collect fine manually (cash) |
+| POST | `/admin/fines/{id}/confirm-cash-payment` | Admin | Confirm cash payment for failed card charge |
+
+### 4.7 User Fine Payment Endpoints
+| Method | Endpoint | Access | Description |
+|--------|----------|--------|-------------|
+| GET | `/api/v1/fines` | User | View user's fines |
+| GET | `/api/v1/fines/{id}` | User | View fine details |
+| POST | `/api/v1/fines/{id}/pay` | User | Pay fine with updated card from profile |
+| PUT | `/api/v1/fines/{id}/payment-method` | User | Update payment method for pending fine |
 
 ### 4.6 PDF Endpoints
 | Method | Endpoint | Access | Description |
@@ -512,9 +562,11 @@ Where:
 | userId | UUID | Foreign key to User |
 | amount | BigDecimal | Fine amount |
 | reason | String | Reason for fine |
-| status | Enum | PENDING/PAID/WAIVED |
-| paymentMethod | Enum | CASH/CARD |
+| status | Enum | PENDING/PAID/WAIVED/PENDING_CASH |
+| originalPaymentMethod | Enum | Original payment method (CASH/CARD) |
+| currentPaymentMethod | Enum | Current payment method (may change after fallback) |
 | chargedDate | LocalDate | Date fine was charged |
+| fallbackReason | String | Reason for fallback to cash (e.g., INSUFFICIENT_FUNDS) |
 | createdAt | LocalDateTime | Creation timestamp |
 | updatedAt | LocalDateTime | Last update timestamp |
 
@@ -528,11 +580,27 @@ Where:
 | uploadedAt | LocalDateTime | Upload timestamp |
 | uploadedBy | UUID | Admin who uploaded |
 
+#### PdfCopy (Anti-Piracy Tracking)
+| Field | Type | Description |
+|-------|------|-------------|
+| id | UUID | Primary key |
+| code | String | Unique anti-piracy code (LIB-{userId}-{bookId}-{timestamp}-{hash}) |
+| userId | UUID | Foreign key to User who downloaded |
+| bookId | UUID | Foreign key to Book |
+| downloadDate | LocalDateTime | When the PDF was downloaded |
+| pdfFileHash | String | SHA-256 hash of the generated PDF |
+| visibleWatermark | String | Visible watermark text applied |
+| invisibleMetadata | String | Hidden metadata embedded |
+| status | Enum | ACTIVE/REVOKED/FLAGGED |
+| flaggedReason | String | Reason if flagged (e.g., found pirated) |
+
 ---
 
 ## 6. Fine Calculation Algorithm Details
 
 ### 6.1 Algorithm Specification
+
+**Important**: Fines are NOT charged automatically on a daily basis. The fine is calculated during the overdue period and charged ONLY when the admin confirms the book return.
 
 ```java
 public BigDecimal calculateFine(BigDecimal rentalPrice, int daysOverdue) {
@@ -565,7 +633,40 @@ public BigDecimal calculateFine(BigDecimal rentalPrice, int daysOverdue) {
 }
 ```
 
-### 6.2 Fine Calculation Examples
+### 6.2 Fine Charging Process
+
+**For Cash Payments:**
+1. User returns the book to the library
+2. Admin confirms return in admin panel
+3. System calculates total fine based on days overdue
+4. Admin displays fine amount to user
+5. User pays fine in cash
+6. Admin marks fine as PAID in the system
+7. Return is fully processed
+
+**For Card Payments:**
+1. User returns the book to the library
+2. Admin confirms return in admin panel
+3. System calculates total fine based on days overdue
+4. System attempts to charge the full fine amount to user's saved card
+5. If charge succeeds:
+   - Fine is marked as PAID
+   - Transaction is recorded
+   - Remaining deposit (if any) is refunded
+   - Return is fully processed
+6. If charge fails due to insufficient funds:
+   - Fine payment method is automatically switched from CARD to CASH
+   - Fine status becomes PENDING_CASH
+   - User is notified via email about the failed card charge and the switch to cash payment
+   - User has two options to pay:
+     a. **Pay in cash at the library**: User visits the library, pays the fine in cash, admin confirms payment in the system
+     b. **Update payment method in profile**: User logs into their account, adds/updates a payment method with sufficient funds, and triggers payment from their profile
+   - User cannot rent new books until fine is paid
+7. If charge fails for other reasons (expired card, blocked card, etc.):
+   - Same fallback process as insufficient funds
+   - User is notified with the specific error reason
+
+### 6.3 Fine Calculation Examples
 
 | Rental Price | Days Overdue | Fine Amount | Notes |
 |--------------|--------------|-------------|-------|
@@ -622,12 +723,24 @@ public BigDecimal calculateFine(BigDecimal rentalPrice, int daysOverdue) {
 - Access tokens validated before PDF serving
 - Receipt codes are unique and non-guessable
 - Payment information encrypted at rest
+- **Anti-Piracy Protection**:
+  - Each downloaded PDF contains a unique identifier code
+  - Code is embedded visibly (watermark) and invisibly (metadata)
+  - All codes are stored in database linked to specific users
+  - Pirated copies can be traced back to the original downloader
+  - PDF file hashes stored to verify file integrity
+- **Payment Fallback Security**:
+  - When card charge fails, payment method switch is logged
+  - User must authenticate to pay fine from profile
+  - Admin must confirm cash payments in person
 
 ### 8.3 Audit Trail
 - All admin actions logged
 - Rental/purchase history immutable
 - Fine calculations logged with timestamps
 - Payment transactions recorded
+- PDF download history with unique codes
+- Anti-piracy code generation and verification logged
 
 ---
 
@@ -638,6 +751,8 @@ public BigDecimal calculateFine(BigDecimal rentalPrice, int daysOverdue) {
 - **Email Service**: For receipts, notifications, reminders
 - **PDF Storage**: Secure cloud storage (S3, etc.)
 - **Barcode Generator**: For receipt generation
+- **PDF Watermarking Service**: For anti-piracy code embedding
+- **Code Generator**: For unique anti-piracy code generation
 
 ### 9.2 Internal Services
 - **Notification Service**: For email reminders and notifications
@@ -651,18 +766,34 @@ public BigDecimal calculateFine(BigDecimal rentalPrice, int daysOverdue) {
 
 ### 10.1 Unit Tests
 - Fine calculation algorithm
+- Fine charging on return confirmation
+- Fallback to cash on card failure
 - Stock count management
 - Availability status calculation
 - Rental period validation
+- Anti-piracy code generation
+- PDF watermarking logic
+- Code uniqueness validation
 
 ### 10.2 Integration Tests
 - Rental flow (create, activate, return)
 - Purchase flow (create, confirm, access)
 - Payment processing (mock gateway)
 - Email notification delivery
+- Fine charging on return confirmation (card and cash)
+- Fallback to cash payment when card charge fails
+- User paying fine from profile with updated card
+- Admin confirming cash payment for failed card charge
+- PDF download with anti-piracy code
+- Anti-piracy code extraction and user identification
 
 ### 10.3 End-to-End Tests
 - Complete rental lifecycle
 - Complete purchase lifecycle
 - Overdue detection and fine application
-- Admin return confirmation
+- Admin return confirmation with fine charging
+- Card charge failure and fallback to cash payment
+- User updating payment method and paying fine from profile
+- Admin confirming cash payment after failed card charge
+- PDF download and anti-piracy code verification
+- Pirated copy identification workflow
