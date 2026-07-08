@@ -1,799 +1,1351 @@
-# Book Management System - Full Documentation
+# Book Management System - Full Specification
 
 ## Overview
 
-The Book Management System is the core module of the Library application. It provides comprehensive functionality for managing the book catalog, including viewing, creating, editing, and deleting books (admin-only operations), as well as advanced features for renting, purchasing, and tracking books.
+Библиотечная система управляет каталогом книг, поддерживает аренду и покупку как физических, так и цифровых экземпляров, обрабатывает платежи, контролирует штрафы за просрочку и обеспечивает защиту контента от пиратства.
+
+Архитектура: **микросервисная** с Event-Driven взаимодействием через RabbitMQ.
 
 ---
 
-## 1. Full Feature Specification
+## 1. Микросервисная архитектура
 
-### 1.1 Book Catalog Management
+### 1.1 Разделение сервисов и баз данных
 
-#### 1.1.1 View Books
-- **Public access**: All users (authenticated and unauthenticated) can browse the book catalog
-- **Pagination**: Books are displayed in paginated lists
-- **Search**: Search books by title, author, category
-- **Filtering**: Filter by availability, price range, category, author
-- **Sorting**: Sort by title, price, rental price, publication year, popularity
-- **Book Details**: View detailed information about a specific book including:
-  - Title, description, ISBN
-  - Author(s) with roles (main author, co-author)
-  - Category/Categories
-  - Price (purchase price)
-  - Rental price
-  - Deposit amount
-  - Stock count (physical copies available)
-  - Published year
-  - Cover image URL
-  - Availability status (available/unavailable for rent/purchase)
-  - Active/Inactive status
+Каждый микросервис имеет **собственную независимую базу данных** (Database-per-Service).
 
-#### 1.1.2 Create Books (Admin Only)
-- Admin can create new books with all metadata
-- Required fields: title, ISBN, price, rentalPrice, stockCount
-- Optional fields: description, publishedYear, coverUrl, depositAmount
-- Authors and categories can be linked during creation
-- ISBN uniqueness validation
-- PDF file upload for digital reading/downloading
+#### Book Service (основной сервис)
+Владеет таблицами:
+- `books`, `book_pdfs`, `pdf_copies`
+- `rentals`, `purchases`
+- `fines`, `user_debt`
+- `reviews`, `bookmarks`, `reading_progress`, `wishlist`, `reservations`
+- `promo_codes`, `promo_code_usages`
+- `authors`, `categories`, `book_authors`, `book_categories`
+- `reading_sessions` (heartbeat)
 
-#### 1.1.3 Edit Books (Admin Only)
-- Full update: Replace all book fields
-- Partial update: Update specific fields only
-- Price update: Update purchase price, rental price, deposit amount separately
-- Stock update: Adjust physical copy count
-- Availability toggle: Mark book as available/unavailable for rent/purchase
-- PDF replacement: Update the digital copy of the book
+#### Payment Service (отдельный микросервис)
+Владеет таблицами:
+- `payment_intents` (счета, привязанные к rental_id / purchase_id)
+- `transactions` (id, amount, currency, status, gateway_response, payment_method)
+- `payment_methods` (привязанные карты, токены)
+- `refunds` (возвраты средств)
 
-#### 1.1.4 Delete Books (Admin Only)
-- **Soft delete**: Mark book as inactive (isActive = false), book remains in database
-- **Hard delete**: Permanently remove book from database (with confirmation)
-- Cannot delete books with active rentals/purchases
-- Cannot delete books with pending transactions
+#### Notification Service (отдельный микросервис)
+Владеет таблицами:
+- `user_notification_preferences`
+- `notification_templates`
+- `notification_history`
+- `message_queue`
 
-### 1.2 Book Rental System
+### 1.2 Event-Driven взаимодействие
 
-#### 1.2.1 Rent a Book
-- User can rent a book for a specified period (default: 30 days)
-- Rental period is configurable per book
-- During rental period, user has digital access to read the book on the website
-- After rental period expires, digital access is revoked
-- Rental requires payment selection:
-  - **Cash payment**: User receives a receipt via email with a barcode
-  - **Card payment**: Payment is processed immediately
+Сервисы общаются **только через асинхронные события** (RabbitMQ). Прямые REST/gRPC вызовы минимизированы.
 
-#### 1.2.2 Cash Payment Flow
-1. User selects "Pay with Cash" option
-2. System generates a rental receipt with:
-   - Unique receipt number
-   - Barcode (QR code or standard barcode)
-   - Book details
-   - Rental period (start date, end date)
-   - Rental price
-   - Deposit amount (if applicable)
-3. Receipt is sent to user's email
-4. User visits the library physically
-5. Admin scans the barcode to confirm the rental
-6. Upon confirmation:
-   - Stock count is decremented by 1
-   - Rental is activated
-   - User gains digital access to the book
-
-#### 1.2.3 Card Payment Flow
-1. User selects "Pay with Card" option
-2. System processes payment through integrated payment gateway
-3. Upon successful payment:
-   - Stock count is decremented by 1
-   - Rental is activated immediately
-   - User gains digital access to the book
-   - Transaction record is created
-
-#### 1.2.4 Stock Management
-- Each book has a `stockCount` field representing physical copies
-- When a book is rented: `stockCount = stockCount - 1`
-- When a book is returned: `stockCount = stockCount + 1`
-- If `stockCount = 0`:
-  - Book is marked as unavailable for rent
-  - Status displays "Unavailable"
-  - Users cannot initiate new rentals
-
-#### 1.2.5 Availability Status
-- **Available**: Book can be rented/purchased (stockCount > 0)
-- **Unavailable**: Book cannot be rented/purchased (stockCount = 0 or manually set)
-- Availability can be manually toggled by admin
-- Automatic availability calculation based on stock count
-
-### 1.3 Book Purchase System
-
-#### 1.3.1 Purchase a Book
-- User can purchase a book for permanent ownership
-- Upon purchase:
-  - User gains permanent digital access to read the book on the website
-  - User can download the PDF version of the book
-  - Transaction record is created
-  - Stock count is decremented by 1 (for physical copy purchase)
-- Payment options:
-  - **Cash payment**: Receipt with barcode sent via email, admin confirms in person
-  - **Card payment**: Immediate processing
-
-#### 1.3.2 Digital Library
-- Purchased books appear in user's "My Books" section
-- User can read purchased books online at any time
-- User can download PDF of purchased books
-- Access is permanent and does not expire
-
-### 1.4 Rental Return System
-
-#### 1.4.1 Return Process
-- User returns the physical book to the library
-- Admin confirms the return in the admin panel
-- Upon confirmation:
-  - Stock count is incremented by 1
-  - Rental record is marked as returned
-  - User's digital access to the book is revoked
-  - Deposit is refunded (if applicable)
-
-#### 1.4.2 Cash Payment Returns
-- Only admin can confirm returns for cash-paid rentals
-- Admin scans the original receipt barcode or looks up the rental
-- Admin verifies the physical book condition
-- Admin confirms return in the system
-
-#### 1.4.3 Card Payment Returns
-- Admin confirms returns for card-paid rentals
-- Upon admin confirmation of return:
-  - System calculates any outstanding fines based on days overdue
-  - Fine is automatically charged to the user's saved card in a single transaction
-  - If card charge fails:
-    - User is notified via email
-    - Fine status becomes PENDING
-    - User must pay fine manually (cash or updated card)
-    - User cannot rent new books until fine is paid
-  - Remaining deposit is refunded to the user's card after fine deduction
-
-### 1.5 Overdue and Fine System
-
-#### 1.5.1 Overdue Detection
-- System checks daily for overdue rentals
-- A rental is overdue when: `currentDate > rentalEndDate`
-
-#### 1.5.2 Reminder Notifications
-- Starting from the day after the rental end date:
-  - User receives a daily email notification reminding them to return the book
-  - Notification includes:
-    - Book title
-    - Original due date
-    - Number of days overdue
-    - Current fine amount (if any)
-    - Instructions for returning
-
-#### 1.5.3 Fine Calculation Algorithm
-- **Grace period**: 5 days after due date (no fine, only reminders)
-- **Fine starts**: Day 6 after due date
-- **Fine calculation formula**:
-
+**Пример флоу аренды (CARD):**
 ```
-fine = baseFine * (daysOverdue - gracePeriod) * multiplier
+1. Book Service: Создаёт rental (PENDING_PAYMENT)
+   → Публикует: RentCreated {rental_id, user_id, amount, deposit_amount}
 
-Where:
-  baseFine = rentalPrice * 0.1 (10% of rental price per day)
-  gracePeriod = 5 days
-  daysOverdue = currentDate - rentalEndDate
-  multiplier = 1.0 for days 6-10
-  multiplier = 1.5 for days 11-20
-  multiplier = 2.0 for days 21+
+2. Payment Service: Слушает RentCreated
+   → Создаёт payment_intent, идёт в банк, делает pre-auth
+   → Публикует: PaymentAuthorized {rental_id, payment_intent_id, status}
+
+3. Book Service: Слушает PaymentAuthorized
+   → Находит rental по rental_id
+   → Меняет статус на ACTIVE
+   → Уменьшает digital_licenses / physical_inventory
+   → Публикует: RentActivated {rental_id, user_id, book_id}
+
+4. Notification Service: Слушает RentActivated
+   → Смотрит настройки юзера в своей БД
+   → Отправляет Email/Push
 ```
 
-- **Example**:
-  - Rental price: $10.00
-  - Days overdue: 15
-  - Fine calculation:
-    - Days 6-10 (5 days): 5 * ($10 * 0.1) * 1.0 = $5.00
-    - Days 11-15 (5 days): 5 * ($10 * 0.1) * 1.5 = $7.50
-    - Total fine: $12.50
+**Преимущества:**
+- Если Notification Service упадёт — книги всё равно выдаются
+- Если Payment Service долго отвечает — Book Service не блокируется
+- Каждый сервис масштабируется независимо
 
-- **Maximum fine**: Capped at 2x the rental price (to prevent excessive fines)
+### 1.3 Связь между сервисами
 
-#### 1.5.4 Fine Collection - Cash Payment
-- Fine is calculated and displayed to the user
-- User must pay the fine in cash when returning the book
-- Admin confirms fine payment upon return
-- User cannot rent new books until fine is paid
+| Book Service поле | Payment Service поле | Описание |
+|-------------------|---------------------|----------|
+| `payment_intent_id` (UUID) | `payment_intents.id` | Ссылка на счёт в Payment Service |
+| — | `payment_intents.rental_id` | Обратная ссылка на аренду |
+| — | `payment_intents.purchase_id` | Обратная ссылка на покупку |
 
-#### 1.5.5 Fine Collection - Card Payment
-- Fine is NOT charged automatically on a daily basis
-- Fine is calculated and accumulated during the overdue period
-- Fine is charged ONLY when admin confirms the book return:
-  - Admin clicks "Confirm Return" in admin panel
-  - System calculates total fine based on days overdue
-  - System attempts to charge the full fine amount to the user's saved card
-  - Transaction is recorded in the system
-- If card charge fails due to insufficient funds or other card issues:
-  - **Automatic fallback to cash payment**: Fine payment method is switched from CARD to CASH
-  - Fine status becomes PENDING_CASH
-  - User is notified via email about:
-    - The failed card charge (with reason)
-    - The automatic switch to cash payment
-    - Available payment options
-  - User can pay the fine in two ways:
-    1. **Pay in cash at the library**: Visit the library, pay the fine in cash, admin confirms in system
-    2. **Update payment method in profile**: Log into account, add/update a card with sufficient funds, trigger payment from profile
-  - User cannot rent new books until fine is paid
-- User can view fine history, status, and payment options in their profile
-
-### 1.6 Admin Features for Books
-
-#### 1.6.1 Price Management
-- Set purchase price for each book
-- Set rental price for each book
-- Set deposit amount (optional, for high-value books)
-- Update prices at any time
-
-#### 1.6.2 Rental Statistics
-- View total number of times a book has been rented
-- View list of users who have rented a specific book
-- View current active rentals for a book
-- View rental history with dates and status
-
-#### 1.6.3 User Management for Books
-- View all users who have rented a specific book
-- View user's rental history
-- View user's current active rentals
-- View user's overdue books and fines
-
-#### 1.6.4 Return Confirmation
-- Admin panel displays pending returns
-- Admin can search for rentals by:
-  - Receipt barcode
-  - User ID/email
-  - Book ID/title
-- Admin confirms return with one click
-- System handles stock count, access revocation, fine settlement
-
-### 1.7 PDF Management
-
-#### 1.7.1 PDF Upload
-- Admin can upload PDF files for books
-- PDF is stored securely (not publicly accessible)
-- PDF is linked to the book record
-
-#### 1.7.2 PDF Access
-- **Rental**: User can read PDF online during rental period only
-- **Purchase**: User can read PDF online and download it permanently
-- PDF viewer is embedded in the website
-- Download button is available only for purchased books
-
-#### 1.7.3 PDF Security - Anti-Piracy System
-- PDFs are not directly accessible via URL
-- Access is validated against user's rental/purchase records
-- **Anti-Piracy Watermarking**:
-  - When a user downloads a PDF, the system generates a unique anti-piracy code
-  - Code format: `LIB-{userId}-{bookId}-{timestamp}-{randomHash}`
-  - The code is embedded into the PDF file in multiple locations:
-    - Visible watermark on each page (user's email/name + code)
-    - Invisible metadata embedded in PDF properties
-    - Hidden text layer with the code (not visible when reading, but present in file)
-  - The anti-piracy code is recorded in the database:
-    - Table: `pdf_copies`
-    - Fields: code, userId, bookId, downloadDate, pdfFileHash, status
-  - If a pirated copy is found:
-    - Admin can extract the code from the PDF
-    - System looks up the code in the database
-    - Identifies the user who downloaded that specific copy
-    - Legal action can be taken against the user
-  - Each download generates a new unique copy with a new code
-  - PDF file hash is stored to verify integrity
-  - User cannot download the same PDF twice without generating a new code
+**Важно:** Book Service **не хранит** `transaction_id`, `preauth_transaction_id`. Все транзакции — в Payment Service.
 
 ---
 
-## 2. Currently Implemented Features
+## 2. Разделение физических и цифровых книг
 
-### 2.1 Book Catalog
-| Feature | Status | Notes |
-|---------|--------|-------|
-| View all books (paginated) | ✅ Implemented | `GET /api/v1/books` |
-| View all books (no pagination) | ✅ Implemented | `GET /api/v1/books/all` |
-| View book by ID | ✅ Implemented | `GET /api/v1/books/{id}` with Redis caching |
-| Search books by title | ✅ Implemented | `GET /api/v1/books/search?title=` |
-| Create book (Admin) | ✅ Implemented | `POST /api/v1/books` |
-| Full update book (Admin) | ✅ Implemented | `PUT /api/v1/books/{id}` |
-| Partial update book (Admin) | ✅ Implemented | `PATCH /api/v1/books/{id}` |
-| Update prices (Admin) | ✅ Implemented | `PATCH /api/v1/books/{id}/prices` |
-| Soft delete book (Admin) | ✅ Implemented | `DELETE /api/v1/books/{id}` |
-| Hard delete book (Admin) | ✅ Implemented | `DELETE /api/v1/books/hard-delete/{id}` |
-| Book import from Open Library | ✅ Implemented | `POST /api/v1/books/import` (async via RabbitMQ) |
-| Redis caching for books | ✅ Implemented | 10-minute TTL |
+### 2.1 Ключевое различие
 
-### 2.2 Book Entity Fields
-| Field | Status | Notes |
-|-------|--------|-------|
-| id | ✅ | Primary key |
-| title | ✅ | |
-| description | ✅ | |
-| isbn | ✅ | Unique constraint |
-| price | ✅ | Purchase price |
-| rentalPrice | ✅ | Rental price per period |
-| depositAmount | ✅ | Deposit for rental |
-| stockCount | ✅ | Physical copies count |
-| publishedYear | ✅ | |
-| coverUrl | ✅ | Cover image URL |
-| isActive | ✅ | Soft delete flag |
+| Аспект | Физическая книга | Цифровая книга |
+|--------|------------------|----------------|
+| Наличие | Ограничено `physical_inventory` | Ограничено `digital_licenses` или `unlimited` |
+| Аренда | Уменьшает `physical_inventory` на 1 | Уменьшает `digital_licenses` на 1 |
+| Возврат | Требует подтверждения админом (сканирование) | Истекает автоматически по таймеру |
+| Покупка | Уменьшает `physical_inventory` на 1 | Не уменьшает лицензии |
+| Скачивание PDF | Нет | Да (при покупке) |
 
-### 2.3 Related Entities
-| Entity | Status | Notes |
-|--------|--------|-------|
-| Author | ✅ | With bio |
-| Category | ✅ | |
-| BookAuthor | ✅ | With author role (MAIN_AUTHOR/CO_AUTHOR) and order |
-| BookCategory | ✅ | Many-to-many relationship |
+### 2.2 Типы аренды
 
-### 2.4 Admin Features
-| Feature | Status | Notes |
-|---------|--------|-------|
-| Admin dashboard statistics | ✅ Implemented | `GET /admin/dashboard` |
-| View all users | ✅ Implemented | `GET /admin/users` |
-| View user details | ✅ Implemented | `GET /admin/users/{id}` |
-| Change user roles | ✅ Implemented | `PUT /admin/users/{id}/roles` |
-| Activate/deactivate user | ✅ Implemented | `PATCH /admin/users/{id}/status` |
-
-### 2.5 Authentication & Authorization
-| Feature | Status | Notes |
-|---------|--------|-------|
-| JWT authentication | ✅ Implemented | Access token (24h) + Refresh token (7d) |
-| Role-based access control | ✅ Implemented | ROLE_ADMIN, ROLE_USER |
-| Admin-only endpoints | ✅ Implemented | `@PreAuthorize` annotations |
-
-### 2.6 Infrastructure
-| Component | Status | Notes |
-|-----------|--------|-------|
-| PostgreSQL database | ✅ | Flyway migrations |
-| Redis caching | ✅ | Spring Cache |
-| RabbitMQ messaging | ✅ | Async operations |
-| Email notifications | ✅ | Welcome email on registration |
-| Docker compose | ✅ | All services containerized |
+| Тип | Описание | Возврат |
+|-----|----------|---------|
+| **Digital Rental** | Чтение на сайте | Автоматический по таймеру |
+| **Physical Rental** | Бумажная книга на руки | Админ подтверждает сканированием |
 
 ---
 
-## 3. Planned Features (Not Yet Implemented)
+## 3. Структура базы данных — Book Service
 
-### 3.1 Rental System
-| Feature | Priority | Notes |
-|---------|----------|-------|
-| Rent a book endpoint | High | Create rental record, decrement stock |
-| Rental entity/model | High | Store rental details, dates, status |
-| Rental period management | High | Configurable rental duration |
-| Digital access control | High | Grant/revoke book reading access |
-| Rental history | Medium | View past rentals |
+### 3.1 Таблица `books`
 
-### 3.2 Purchase System
-| Feature | Priority | Notes |
-|---------|----------|-------|
-| Purchase a book endpoint | High | Create purchase record, decrement stock |
-| Purchase entity/model | High | Store purchase details |
-| Permanent digital access | High | User's "My Books" section |
-| PDF download for purchased books | High | Secure download link |
-| Online PDF reader | Medium | Embedded viewer |
+| Поле | Тип | Индекс | Описание |
+|------|-----|--------|----------|
+| id | UUID | PK | Первичный ключ |
+| title | VARCHAR(255) | INDEX | Название книги |
+| description | TEXT | | Описание |
+| isbn | VARCHAR(13) | UNIQUE | Уникальный ISBN |
+| has_physical | BOOLEAN | | Доступна ли физическая версия |
+| has_digital | BOOLEAN | | Доступна ли цифровая версия |
+| physical_inventory | INTEGER | | Количество бумажных копий (0 = unavailable) |
+| digital_licenses | INTEGER | | Цифровые лицензии (-1 = безлимит) |
+| price_purchase | DECIMAL(10,2) | | Цена покупки (в тенге) |
+| price_rental | DECIMAL(10,2) | | Цена аренды за период (в тенге) |
+| deposit_amount | DECIMAL(10,2) | | Залог при аренде (в тенге) |
+| is_available_for_rent | BOOLEAN | | Ручной тумблер доступности аренды |
+| is_available_for_purchase | BOOLEAN | | Ручной тумблер доступности покупки |
+| publication_year | INTEGER | INDEX | Год издания |
+| cover_image_url | VARCHAR(500) | | URL обложки |
+| total_rentals_count | INTEGER | | Счётчик аренд для аналитики |
+| total_purchases_count | INTEGER | | Счётчик покупок для аналитики |
+| is_active | BOOLEAN | INDEX | Soft delete флаг |
+| version | INTEGER | | Optimistic locking (защита от race condition) |
+| created_at | TIMESTAMP | | Дата создания |
+| updated_at | TIMESTAMP | | Дата обновления |
 
-### 3.3 Payment System
-| Feature | Priority | Notes |
-|---------|----------|-------|
-| Payment method management | High | Add/edit/delete payment methods |
-| Cash payment flow | High | Receipt generation, barcode, email |
-| Card payment flow | High | Payment gateway integration |
-| Payment entity/model | High | Transaction records |
-| Payment service layer | High | Process payments |
-| Payment controller | High | API endpoints |
+### 3.2 Таблица `rentals`
 
-### 3.4 Stock & Availability
-| Feature | Priority | Notes |
-|---------|----------|-------|
-| Automatic stock decrement | High | On rent/purchase |
-| Automatic stock increment | High | On return |
-| Availability status calculation | High | Based on stock count |
-| Manual availability toggle | Medium | Admin override |
-| "Unavailable" status display | Medium | API response field |
+| Поле | Тип | Индекс | Описание |
+|------|-----|--------|----------|
+| id | UUID | PK | Первичный ключ |
+| user_id | UUID | INDEX, FK → users | ID пользователя |
+| book_id | UUID | INDEX, FK → books | ID книги |
+| rental_type | ENUM | INDEX | DIGITAL / PHYSICAL |
+| payment_method | ENUM | | CASH / CARD |
+| status | ENUM | INDEX | PENDING_PAYMENT / PENDING_CONFIRMATION / ACTIVE / OVERDUE / RETURNED / EXPIRED / LOST / CANCELLED |
+| start_date | DATE | | Дата начала аренды |
+| end_date | DATE | INDEX | Дата окончания аренды |
+| actual_return_date | DATE | | Дата фактического возврата (NULL) |
+| rental_price | DECIMAL(10,2) | | Цена аренды (в тенге) |
+| deposit_amount | DECIMAL(10,2) | | Залог (в тенге) |
+| payment_intent_id | UUID | FK → Payment Service | Ссылка на счёт в Payment Service |
+| promo_code_id | UUID | FK → promo_codes | Использованный промокод (NULL) |
+| original_amount | DECIMAL(10,2) | | Цена до скидок (в тенге) |
+| discount_amount | DECIMAL(10,2) | | Сумма скидки (в тенге) |
+| final_amount | DECIMAL(10,2) | | Итог к оплате (в тенге) |
+| receipt_code | VARCHAR(64) | UNIQUE | Код чека/штрих-кода (для CASH) |
+| is_receipt_confirmed | BOOLEAN | | Админ подтвердил чек (для CASH) |
+| fine_amount | DECIMAL(10,2) | | Начисленный штраф (в тенге) |
+| fine_status | ENUM | | NONE / PENDING / PAID / WAIVED |
+| fine_payment_method | ENUM | | CASH / CARD / INTERNAL_DEBT |
+| created_at | TIMESTAMP | | Дата создания |
+| updated_at | TIMESTAMP | | Дата обновления |
 
-### 3.5 Return System
-| Feature | Priority | Notes |
-|---------|----------|-------|
-| Return book endpoint (Admin) | High | Confirm return, increment stock |
-| Return confirmation UI | Medium | Admin panel feature |
-| Barcode scanning support | Medium | For cash payment receipts |
-| Deposit refund processing | Medium | Automatic refund |
+### 3.3 Таблица `purchases`
 
-### 3.6 Overdue & Fine System
-| Feature | Priority | Notes |
-|---------|----------|-------|
-| Overdue detection scheduled job | High | Daily check |
-| Reminder notifications | High | Daily email for overdue books |
-| Fine calculation algorithm | High | Progressive fine system |
-| Fine entity/model | High | Store fine records |
-| Fine charge on return confirmation | High | Single charge when admin confirms return |
-| Fallback to cash on card failure | High | Auto-switch to cash if card charge fails |
-| Fine payment (cash) | Medium | Admin confirmation at return |
-| Fine payment via profile | Medium | User can update card and pay from profile |
-| Fine history | Medium | View fine history |
-| Account suspension for unpaid fines | Low | Until fine is paid |
+| Поле | Тип | Индекс | Описание |
+|------|-----|--------|----------|
+| id | UUID | PK | Первичный ключ |
+| user_id | UUID | INDEX, FK → users | ID пользователя |
+| book_id | UUID | INDEX, FK → books | ID книги |
+| purchase_type | ENUM | INDEX | PHYSICAL / DIGITAL |
+| payment_method | ENUM | | CASH / CARD (для DIGITAL — только CARD) |
+| status | ENUM | INDEX | PENDING_PAYMENT / PENDING_CONFIRMATION / COMPLETED / CANCELLED |
+| purchase_date | TIMESTAMP | | Дата покупки |
+| purchase_price | DECIMAL(10,2) | | Цена покупки (в тенге) |
+| payment_intent_id | UUID | FK → Payment Service | Ссылка на счёт в Payment Service |
+| promo_code_id | UUID | FK → promo_codes | Использованный промокод (NULL) |
+| original_amount | DECIMAL(10,2) | | Цена до скидок (в тенге) |
+| discount_amount | DECIMAL(10,2) | | Сумма скидки (в тенге) |
+| final_amount | DECIMAL(10,2) | | Итог к оплате (в тенге) |
+| receipt_code | VARCHAR(64) | UNIQUE | Код чека (для CASH, PHYSICAL only) |
+| is_receipt_confirmed | BOOLEAN | | Админ подтвердил оплату (для CASH) |
+| created_at | TIMESTAMP | | Дата создания |
+| updated_at | TIMESTAMP | | Дата обновления |
 
-### 3.7 Admin Book Statistics
-| Feature | Priority | Notes |
-|---------|----------|-------|
-| Total rentals per book | Medium | Counter in book entity |
-| Users who rented a book | Medium | List with dates |
-| Current active rentals | Medium | Real-time count |
-| Rental revenue statistics | Low | Financial reporting |
+### 3.4 Таблица `fines`
 
-### 3.8 PDF Management
-| Feature | Priority | Notes |
-|---------|----------|-------|
-| PDF upload (Admin) | High | Secure storage |
-| PDF access control | High | Based on rental/purchase |
-| PDF viewer | Medium | Web-based reader |
-| PDF download | Medium | For purchased books only |
-| Anti-piracy watermarking | High | Visible + invisible watermarks |
-| Unique code generation | High | Per-download unique code |
-| Code storage in database | High | Track who downloaded which copy |
-| Pirated copy identification | Medium | Extract code to find source |
+| Поле | Тип | Индекс | Описание |
+|------|-----|--------|----------|
+| id | UUID | PK | Первичный ключ |
+| rental_id | UUID | INDEX, FK → rentals | ID аренды |
+| user_id | UUID | INDEX, FK → users | ID пользователя |
+| amount | DECIMAL(10,2) | | Сумма штрафа (в тенге) |
+| status | ENUM | INDEX | PENDING / PAID / WAIVED |
+| payment_method | ENUM | | CASH / CARD / INTERNAL_DEBT |
+| reason | VARCHAR(500) | | Причина штрафа |
+| days_overdue | INTEGER | | Количество дней просрочки |
+| calculated_at | TIMESTAMP | | Дата расчёта штрафа |
+| paid_at | TIMESTAMP | | Дата оплаты |
+| created_at | TIMESTAMP | | Дата создания |
+| updated_at | TIMESTAMP | | Дата обновления |
 
-### 3.9 Receipt & Barcode System
-| Feature | Priority | Notes |
-|---------|----------|-------|
-| Receipt generation | High | For cash payments |
-| Barcode/QR code generation | High | Unique identifier |
-| Email receipt delivery | High | Send to user's email |
-| Barcode scanning (Admin) | Medium | Confirm rental/purchase |
+### 3.5 Таблица `user_debt`
 
-### 3.10 Notification Enhancements
-| Feature | Priority | Notes |
-|---------|----------|-------|
-| Rental confirmation email | High | Sent on successful rental |
-| Purchase confirmation email | High | Sent on successful purchase |
-| Overdue reminder emails | High | Daily until return |
-| Fine notification email | High | When fine is applied |
-| Return confirmation email | Medium | Sent on successful return |
-| Receipt email with barcode | High | For cash payments |
+| Поле | Тип | Индекс | Описание |
+|------|-----|--------|----------|
+| id | UUID | PK | Первичный ключ |
+| user_id | UUID | UNIQUE, FK → users | ID пользователя |
+| total_debt | DECIMAL(10,2) | | Общая сумма задолженности (в тенге) |
+| is_blocked | BOOLEAN | | Заблокирован от новых аренд |
+| last_updated | TIMESTAMP | | Дата последнего обновления |
+
+### 3.6 Таблица `pdf_copies`
+
+| Поле | Тип | Индекс | Описание |
+|------|-----|--------|----------|
+| id | UUID | PK | Первичный ключ |
+| book_id | UUID | INDEX, FK → books | ID книги |
+| user_id | UUID | INDEX, FK → users | ID пользователя |
+| purchase_id | UUID | FK → purchases | ID покупки (NULL если аренда) |
+| rental_id | UUID | FK → rentals | ID аренды (NULL если покупка) |
+| anti_piracy_code | VARCHAR(128) | UNIQUE | Уникальный код |
+| watermarked_file_url | VARCHAR(500) | | URL в S3/MinIO (сгенерированный PDF) |
+| pdf_file_hash | VARCHAR(64) | | SHA-256 хеш сгенерированного PDF |
+| visible_watermark | TEXT | | Текст видимого водяного знака |
+| invisible_metadata | TEXT | | Скрытые метаданные |
+| download_count | INTEGER | | Количество скачиваний |
+| max_downloads | INTEGER | | Максимум скачиваний (1 = покупка, 0 = аренда) |
+| status | ENUM | INDEX | ACTIVE / REVOKED / FLAGGED |
+| flagged_reason | VARCHAR(500) | | Причина флага |
+| created_at | TIMESTAMP | | Дата создания |
+
+### 3.7 Таблица `book_pdfs`
+
+| Поле | Тип | Индекс | Описание |
+|------|-----|--------|----------|
+| id | UUID | PK | Первичный ключ |
+| book_id | UUID | UNIQUE, FK → books | ID книги |
+| original_file_url | VARCHAR(500) | | URL оригинального PDF в S3/MinIO |
+| file_size | BIGINT | | Размер файла в байтах |
+| uploaded_by | UUID | FK → users | Админ, загрузивший файл |
+| uploaded_at | TIMESTAMP | | Дата загрузки |
+
+### 3.8 Таблица `reviews`
+
+| Поле | Тип | Индекс | Описание |
+|------|-----|--------|----------|
+| id | UUID | PK | Первичный ключ |
+| book_id | UUID | INDEX, FK → books | ID книги |
+| user_id | UUID | INDEX, FK → users | ID пользователя |
+| rating | INTEGER | | Оценка 1-5 |
+| review_text | TEXT | | Текст рецензии |
+| status | ENUM | INDEX | PENDING / APPROVED / REJECTED |
+| created_at | TIMESTAMP | INDEX | Дата создания |
+| updated_at | TIMESTAMP | | Дата обновления |
+
+### 3.9 Таблица `bookmarks`
+
+| Поле | Тип | Индекс | Описание |
+|------|-----|--------|----------|
+| id | UUID | PK | Первичный ключ |
+| user_id | UUID | INDEX, FK → users | ID пользователя |
+| book_id | UUID | INDEX, FK → books | ID книги |
+| page_number | INTEGER | | Номер страницы |
+| note | TEXT | | Заметка к закладке |
+| created_at | TIMESTAMP | | Дата создания |
+
+### 3.10 Таблица `reading_progress`
+
+| Поле | Тип | Индекс | Описание |
+|------|-----|--------|----------|
+| id | UUID | PK | Первичный ключ |
+| user_id | UUID | INDEX, FK → users | ID пользователя |
+| book_id | UUID | INDEX, FK → books | ID книги |
+| last_page | INTEGER | | Последняя прочитанная страница |
+| total_pages | INTEGER | | Всего страниц в книге |
+| last_read_at | TIMESTAMP | | Дата последнего чтения |
+
+### 3.11 Таблица `wishlist`
+
+| Поле | Тип | Индекс | Описание |
+|------|-----|--------|----------|
+| id | UUID | PK | Первичный ключ |
+| user_id | UUID | INDEX, FK → users | ID пользователя |
+| book_id | UUID | INDEX, FK → books | ID книги |
+| notification_sent | BOOLEAN | | Уведомление уже отправлено |
+| created_at | TIMESTAMP | | Дата добавления |
+
+### 3.12 Таблица `reservations`
+
+| Поле | Тип | Индекс | Описание |
+|------|-----|--------|----------|
+| id | UUID | PK | Первичный ключ |
+| user_id | UUID | INDEX, FK → users | ID пользователя |
+| book_id | UUID | INDEX, FK → books | ID книги |
+| status | ENUM | INDEX | WAITING / READY / EXPIRED / CANCELLED |
+| reserved_at | TIMESTAMP | | Дата бронирования |
+| ready_at | TIMESTAMP | | Дата когда книга готова к выдаче |
+| expires_at | TIMESTAMP | INDEX | Срок действия (24 часа после ready_at) |
+| notification_sent | BOOLEAN | | Уведомление отправлено |
+
+### 3.13 Таблица `promo_codes`
+
+| Поле | Тип | Индекс | Описание |
+|------|-----|--------|----------|
+| id | UUID | PK | Первичный ключ |
+| code | VARCHAR(50) | UNIQUE | Уникальный промокод |
+| discount_type | ENUM | | PERCENT / FIXED |
+| discount_value | DECIMAL(10,2) | | Значение скидки |
+| applicable_to | ENUM | | RENTAL / PURCHASE / BOTH |
+| max_uses | INTEGER | | Максимум использований (NULL = безлимит) |
+| used_count | INTEGER | | Количество использований |
+| valid_from | TIMESTAMP | | Дата начала действия |
+| valid_until | TIMESTAMP | | Дата окончания действия |
+| is_active | BOOLEAN | INDEX | Активен ли промокод |
+
+### 3.14 Таблица `reading_sessions` (Heartbeat)
+
+| Поле | Тип | Индекс | Описание |
+|------|-----|--------|----------|
+| id | UUID | PK | Первичный ключ |
+| user_id | UUID | INDEX, FK → users | ID пользователя |
+| book_id | UUID | INDEX, FK → books | ID книги |
+| rental_id | UUID | FK → rentals | ID аренды |
+| started_at | TIMESTAMP | | Начало сессии чтения |
+| last_heartbeat | TIMESTAMP | INDEX | Последний сигнал активности |
+| last_page | INTEGER | | Текущая страница |
+| is_active | BOOLEAN | INDEX | Активна ли сессия |
+
+### 3.15 Таблица `authors`
+
+| Поле | Тип | Индекс | Описание |
+|------|-----|--------|----------|
+| id | UUID | PK | Первичный ключ |
+| full_name | VARCHAR(255) | INDEX | Полное имя автора |
+| bio | TEXT | | Биография |
+| photo_url | VARCHAR(500) | | URL фото автора |
+| created_at | TIMESTAMP | | Дата создания |
+| updated_at | TIMESTAMP | | Дата обновления |
+
+### 3.16 Таблица `categories`
+
+| Поле | Тип | Индекс | Описание |
+|------|-----|--------|----------|
+| id | UUID | PK | Первичный ключ |
+| name | VARCHAR(100) | UNIQUE | Название категории |
+| parent_id | UUID | FK → categories, NULLABLE | Родительская категория (иерархия) |
+| description | TEXT | | Описание категории |
+| created_at | TIMESTAMP | | Дата создания |
+
+### 3.17 Таблица `book_authors` (Many-to-Many)
+
+| Поле | Тип | Индекс | Описание |
+|------|-----|--------|----------|
+| book_id | UUID | PK, FK → books | ID книги |
+| author_id | UUID | PK, FK → authors | ID автора |
+| author_role | ENUM | | MAIN_AUTHOR / CO_AUTHOR |
+| author_order | INTEGER | | Порядок отображения |
+
+### 3.18 Таблица `book_categories` (Many-to-Many)
+
+| Поле | Тип | Индекс | Описание |
+|------|-----|--------|----------|
+| book_id | UUID | PK, FK → books | ID книги |
+| category_id | UUID | PK, FK → categories | ID категории |
+
+### 3.19 Таблица `promo_code_usages`
+
+| Поле | Тип | Индекс | Описание |
+|------|-----|--------|----------|
+| id | UUID | PK | Первичный ключ |
+| promo_code_id | UUID | INDEX, FK → promo_codes | ID промокода |
+| user_id | UUID | INDEX, FK → users | ID пользователя |
+| rental_id | UUID | FK → rentals, NULLABLE | ID аренды (если применён к аренде) |
+| purchase_id | UUID | FK → purchases, NULLABLE | ID покупки (если применён к покупке) |
+| discount_amount | DECIMAL(10,2) | | Сумма скидки (в тенге) |
+| applied_at | TIMESTAMP | | Дата применения |
 
 ---
 
-## 4. API Endpoints (Planned)
+## 4. Бизнес-логика
 
-### 4.1 Rental Endpoints
-| Method | Endpoint | Access | Description |
-|--------|----------|--------|-------------|
-| POST | `/api/v1/books/{id}/rent` | User | Rent a book |
-| GET | `/api/v1/rentals` | User | View user's rentals |
-| GET | `/api/v1/rentals/{id}` | User | View rental details |
-| GET | `/api/v1/rentals/active` | User | View active rentals |
-| GET | `/api/v1/rentals/overdue` | User | View overdue rentals |
+### 4.1 Каталог книг
 
-### 4.2 Purchase Endpoints
-| Method | Endpoint | Access | Description |
-|--------|----------|--------|-------------|
-| POST | `/api/v1/books/{id}/purchase` | User | Purchase a book |
-| GET | `/api/v1/purchases` | User | View user's purchases |
-| GET | `/api/v1/purchases/{id}` | User | View purchase details |
-| GET | `/api/v1/purchases/{id}/download` | User | Download purchased PDF |
+#### 4.1.1 Просмотр книг
+- Все пользователи (авторизованные и нет) могут просматривать каталог
+- Пагинация, сортировка по названию, цене, году издания, популярности
+- Поиск по названию, автору, ISBN, категории, жанрам, тегам
+- Фильтры:
+  - «Только доступные сейчас» (physical_inventory > 0 или digital_licenses > 0/-1)
+  - «Только электронные» (has_digital = true)
+  - «Только бумажные» (has_physical = true)
+  - По диапазону цен
+  - По категориям/жанрам
 
-### 4.3 Return Endpoints (Admin)
-| Method | Endpoint | Access | Description |
-|--------|----------|--------|-------------|
-| POST | `/admin/rentals/{id}/return` | Admin | Confirm book return |
-| POST | `/admin/rentals/scan-barcode` | Admin | Scan receipt barcode |
+#### 4.1.2 Детальная страница книги
+Отображает:
+- Название, описание, обложка
+- Автор(ы) с ролями (основной, соавтор)
+- Категории/жанры
+- Год издания, ISBN
+- Цены: покупка (тенге), аренда (тенге/период)
+- Статус доступности:
+  - Физическая: `Available (N copies)` / `Unavailable` / `Available for reservation`
+  - Цифровая: `Available` / `Unavailable (no licenses)` / `Unlimited`
+- Рейтинг (средний из отзывов)
+- Количество аренд и покупок
+- Кнопки: «Арендовать», «Купить», «В wishlist», «Зарезервировать»
 
-### 4.4 Payment Endpoints
-| Method | Endpoint | Access | Description |
-|--------|----------|--------|-------------|
-| GET | `/api/v1/payment-methods` | User | View payment methods |
-| POST | `/api/v1/payment-methods` | User | Add payment method |
-| PUT | `/api/v1/payment-methods/{id}` | User | Update payment method |
-| DELETE | `/api/v1/payment-methods/{id}` | User | Delete payment method |
-| POST | `/api/v1/payments/process` | User | Process payment |
+#### 4.1.3 Создание книг (Admin)
+- Заполнение всех метаданных
+- Загрузка PDF файла
+- Установка цен (покупка, аренда, залог)
+- Установка количества физических копий (`physical_inventory`)
+- Установка цифровых лицензий (`digital_licenses`: число или -1 для безлимита)
+- Переключатели доступности (`is_available_for_rent`, `is_available_for_purchase`)
+- Привязка авторов (из существующих или создание новых)
+- Привязка категорий (из существующих или создание новых)
 
-### 4.5 Admin Book Statistics Endpoints
-| Method | Endpoint | Access | Description |
-|--------|----------|--------|-------------|
-| GET | `/admin/books/{id}/rentals` | Admin | View rentals for a book |
-| GET | `/admin/books/{id}/rentals/count` | Admin | Total rentals count |
-| GET | `/admin/books/{id}/rentals/users` | Admin | Users who rented |
-| GET | `/admin/rentals/overdue` | Admin | All overdue rentals |
-| POST | `/admin/fines/{id}/collect` | Admin | Collect fine manually (cash) |
-| POST | `/admin/fines/{id}/confirm-cash-payment` | Admin | Confirm cash payment for failed card charge |
+#### 4.1.4 Редактирование книг (Admin)
+- Полное и частичное обновление
+- Обновление цен отдельно
+- Изменение количества копий (инвентаризация)
+- Переключение доступности
+- Замена PDF файла
 
-### 4.7 User Fine Payment Endpoints
-| Method | Endpoint | Access | Description |
-|--------|----------|--------|-------------|
-| GET | `/api/v1/fines` | User | View user's fines |
-| GET | `/api/v1/fines/{id}` | User | View fine details |
-| POST | `/api/v1/fines/{id}/pay` | User | Pay fine with updated card from profile |
-| PUT | `/api/v1/fines/{id}/payment-method` | User | Update payment method for pending fine |
+#### 4.1.5 Удаление книг (Admin)
+- Soft delete (isActive = false) — книга скрывается из каталога
+- Hard delete — полное удаление (только если нет активных аренд/покупок)
 
-### 4.6 PDF Endpoints
-| Method | Endpoint | Access | Description |
-|--------|----------|--------|-------------|
-| POST | `/admin/books/{id}/pdf` | Admin | Upload PDF |
-| GET | `/api/v1/books/{id}/read` | User | Read book online |
-| GET | `/api/v1/books/{id}/pdf` | User | View PDF metadata |
+### 4.2 Аренда книг
 
----
+#### 4.2.1 Цифровая аренда (Digital Rental)
+1. Пользователь выбирает «Арендовать цифровую версию»
+2. Система проверяет:
+   - `has_digital = true`
+   - `is_available_for_rent = true`
+   - `digital_licenses > 0` или `digital_licenses = -1`
+   - У пользователя нет неоплаченных штрафов (`user_debt.total_debt = 0`)
+   - Пользователь не заблокирован (`user_debt.is_blocked = false`)
+   - Нет активной аренды этой же книги у пользователя
+3. **Race Condition защита:** `SELECT ... FOR UPDATE` на запись книги + проверка `version` (optimistic locking)
+4. Пользователь выбирает способ оплаты:
+   - **CARD**: Book Service создаёт rental (PENDING_PAYMENT) → публикует событие `RentCreated` → Payment Service делает pre-auth → публикует `PaymentAuthorized` → Book Service активирует аренду
+   - **CASH**: Book Service создаёт rental (PENDING_CONFIRMATION) → генерирует `receipt_code` → отправляет событие в очередь → Notification Service шлёт чек на email
+5. При CARD (после `PaymentAuthorized`):
+   - `digital_licenses = digital_licenses - 1` (если не -1)
+   - Статус аренды → `ACTIVE`
+   - Пользователь получает доступ к онлайн-чтению
+   - Создаётся `reading_session` с heartbeat
+   - Доступ истекает автоматически по `end_date`
+   - `digital_licenses = digital_licenses + 1` (если не -1)
+6. При CASH (после подтверждения админом):
+   - Админ сканирует штрих-код → подтверждает аренду
+   - `digital_licenses = digital_licenses - 1` (если не -1)
+   - Статус → `ACTIVE`
+   - Пользователь получает доступ к онлайн-чтению
+   - Доступ истекает автоматически по `end_date`
+   - `digital_licenses = digital_licenses + 1` (если не -1)
 
-## 5. Database Schema (Planned Additions)
+#### 4.2.2 Физическая аренда (Physical Rental)
+1. Пользователь выбирает «Арендовать бумажную книгу»
+2. Система проверяет:
+   - `has_physical = true`
+   - `is_available_for_rent = true`
+   - `physical_inventory > 0`
+   - У пользователя нет неоплаченных штрафов
+   - Пользователь не заблокирован
+   - Нет активной аренды этой же книги у пользователя
+3. **Race Condition защита:** `SELECT ... FOR UPDATE` на запись книги + optimistic locking
+4. Пользователь выбирает способ оплаты:
+   - **CARD**: Book Service создаёт rental (PENDING_PAYMENT) → публикует `RentCreated` → Payment Service делает pre-auth (`price_rental + deposit_amount`) → публикует `PaymentAuthorized` → Book Service активирует аренду
+   - **CASH**: Book Service создаёт rental (PENDING_CONFIRMATION) → генерирует чек → Notification Service шлёт на email
+5. При CARD (после `PaymentAuthorized`):
+   - `physical_inventory = physical_inventory - 1`
+   - Статус аренды → `ACTIVE`
+   - Пользователь забирает книгу из библиотеки
+   - **Возврат требует подтверждения админом** (сканирование штрих-кода)
+6. При CASH (после подтверждения админом):
+   - Админ сканирует штрих-код → подтверждает выдачу
+   - `physical_inventory = physical_inventory - 1`
+   - Статус → `ACTIVE`
+   - **Возврат требует подтверждения админом**
 
-### 5.1 New Entities
+#### 4.2.3 Период аренды
+- Стандартный период: 30 дней (настраивается админом)
+- При создании аренды: `end_date = start_date + rental_period`
+- Цифровая аренда: доступ прекращается автоматически в `end_date 00:00`
+- Физическая аренда: требует возврата и подтверждения админом
 
-#### Rental
-| Field | Type | Description |
-|-------|------|-------------|
-| id | UUID | Primary key |
-| userId | UUID | Foreign key to User |
-| bookId | UUID | Foreign key to Book |
-| startDate | LocalDate | Rental start date |
-| endDate | LocalDate | Rental end date |
-| actualReturnDate | LocalDate | Actual return date (null if not returned) |
-| paymentMethod | Enum | CASH/CARD |
-| status | Enum | ACTIVE/RETURNED/OVERDUE/CANCELLED |
-| rentalPrice | BigDecimal | Price paid for rental |
-| depositAmount | BigDecimal | Deposit paid |
-| receiptCode | String | Barcode/receipt code for cash payments |
-| isReceiptConfirmed | Boolean | Whether admin confirmed receipt |
-| fineAmount | BigDecimal | Total fine accrued |
-| createdAt | LocalDateTime | Creation timestamp |
-| updatedAt | LocalDateTime | Last update timestamp |
+#### 4.2.4 Heartbeat для цифровых сессий
+- При открытии книги в онлайн-ридере создаётся `reading_session`
+- Фронтенд отправляет heartbeat каждые 5 минут
+- Если heartbeat не получен 15 минут → сессия закрывается
+- При закрытии сессии: `is_active = false`
+- Если все сессии для аренды закрыты и аренда ещё активна — лицензия **не** освобождается (аренда = время, а не сессия)
+- Heartbeat нужен для аналитики и корректного сохранения прогресса
 
-#### Purchase
-| Field | Type | Description |
-|-------|------|-------------|
-| id | UUID | Primary key |
-| userId | UUID | Foreign key to User |
-| bookId | UUID | Foreign key to Book |
-| purchaseDate | LocalDateTime | Date of purchase |
-| paymentMethod | Enum | CASH/CARD |
-| status | Enum | PENDING/COMPLETED/CANCELLED |
-| purchasePrice | BigDecimal | Price paid |
-| receiptCode | String | Barcode/receipt code for cash payments |
-| isReceiptConfirmed | Boolean | Whether admin confirmed receipt |
-| createdAt | LocalDateTime | Creation timestamp |
+### 4.3 Покупка книг
 
-#### Fine
-| Field | Type | Description |
-|-------|------|-------------|
-| id | UUID | Primary key |
-| rentalId | UUID | Foreign key to Rental |
-| userId | UUID | Foreign key to User |
-| amount | BigDecimal | Fine amount |
-| reason | String | Reason for fine |
-| status | Enum | PENDING/PAID/WAIVED/PENDING_CASH |
-| originalPaymentMethod | Enum | Original payment method (CASH/CARD) |
-| currentPaymentMethod | Enum | Current payment method (may change after fallback) |
-| chargedDate | LocalDate | Date fine was charged |
-| fallbackReason | String | Reason for fallback to cash (e.g., INSUFFICIENT_FUNDS) |
-| createdAt | LocalDateTime | Creation timestamp |
-| updatedAt | LocalDateTime | Last update timestamp |
+#### 4.3.1 Покупка цифровой версии
+1. Пользователь выбирает «Купить цифровую версию»
+2. Система проверяет:
+   - `has_digital = true`
+   - `is_available_for_purchase = true`
+   - У пользователя нет неоплаченных штрафов
+   - У пользователя ещё нет покупки этой же цифровой книги
+3. **Оплата только через карту (CARD)** — наличные не поддерживаются для цифровых покупок
+4. Процесс оплаты:
+   - Book Service создаёт purchase (PENDING_PAYMENT) → публикует `PurchaseCreated`
+   - Payment Service слушает → создаёт invoice → списывает `price_purchase` → публикует `PaymentCompleted`
+   - Book Service слушает → статус → `COMPLETED`
+   - Генерируется `PdfCopy` с анти-пиратским кодом
+   - PDF сохраняется в S3/MinIO, `watermarked_file_url` записывается в `pdf_copies`
+   - Пользователь получает:
+     - Постоянный доступ к онлайн-чтению
+     - Возможность скачать PDF (максимум 1 раз)
 
-#### BookPdf
-| Field | Type | Description |
-|-------|------|-------------|
-| id | UUID | Primary key |
-| bookId | UUID | Foreign key to Book |
-| fileUrl | String | Secure storage URL |
-| fileSize | Long | File size in bytes |
-| uploadedAt | LocalDateTime | Upload timestamp |
-| uploadedBy | UUID | Admin who uploaded |
+#### 4.3.2 Покупка физической версии
+1. Пользователь выбирает «Купить бумажную книгу»
+2. Система проверяет:
+   - `has_physical = true`
+   - `is_available_for_purchase = true`
+   - `physical_inventory > 0`
+   - **Race Condition защита:** `SELECT ... FOR UPDATE` + optimistic locking
+3. При CARD:
+   - Book Service создаёт purchase (PENDING_PAYMENT) → публикует `PurchaseCreated`
+   - Payment Service списывает `price_purchase` → публикует `PaymentCompleted`
+   - Book Service: `physical_inventory = physical_inventory - 1`, статус → `COMPLETED`
+   - Пользователь забирает книгу из библиотеки
+4. При CASH:
+   - Book Service создаёт purchase (PENDING_CONFIRMATION) → генерирует чек
+   - Notification Service шлёт чек на email
+   - Админ подтверждает оплату → статус → `COMPLETED`
+   - `physical_inventory = physical_inventory - 1`
+   - Пользователь забирает книгу
 
-#### PdfCopy (Anti-Piracy Tracking)
-| Field | Type | Description |
-|-------|------|-------------|
-| id | UUID | Primary key |
-| code | String | Unique anti-piracy code (LIB-{userId}-{bookId}-{timestamp}-{hash}) |
-| userId | UUID | Foreign key to User who downloaded |
-| bookId | UUID | Foreign key to Book |
-| downloadDate | LocalDateTime | When the PDF was downloaded |
-| pdfFileHash | String | SHA-256 hash of the generated PDF |
-| visibleWatermark | String | Visible watermark text applied |
-| invisibleMetadata | String | Hidden metadata embedded |
-| status | Enum | ACTIVE/REVOKED/FLAGGED |
-| flaggedReason | String | Reason if flagged (e.g., found pirated) |
+### 4.4 Возврат книг
 
----
+#### 4.4.1 Цифровая аренда
+- Возврат **автоматический** по истечении `end_date`
+- Scheduled job проверяет просроченные аренды ежедневно
+- При `current_date > end_date`:
+  - Доступ к чтению отзывается
+  - `reading_session.is_active = false` для всех активных сессий
+  - `digital_licenses = digital_licenses + 1` (если не -1)
+  - Статус → `EXPIRED`
+  - Если есть просрочка → рассчитывается штраф
 
-## 6. Fine Calculation Algorithm Details
+#### 4.4.2 Физическая аренда — возврат и депозит
 
-### 6.1 Algorithm Specification
+**Флоу возврата:**
+1. Пользователь возвращает книгу в библиотеку
+2. Админ сканирует штрих-код (из чека или из системы)
+3. Система находит аренду по коду
+4. Админ подтверждает возврат:
+   - `physical_inventory = physical_inventory + 1`
+   - `actual_return_date = current_date`
+   - Статус → `RETURNED`
+   - Рассчитывается штраф (если есть просрочка)
 
-**Important**: Fines are NOT charged automatically on a daily basis. The fine is calculated during the overdue period and charged ONLY when the admin confirms the book return.
+**Флоу возврата депозита:**
 
-```java
-public BigDecimal calculateFine(BigDecimal rentalPrice, int daysOverdue) {
-    int gracePeriod = 5;
-    
-    if (daysOverdue <= gracePeriod) {
-        return BigDecimal.ZERO;
-    }
-    
-    BigDecimal baseFine = rentalPrice.multiply(new BigDecimal("0.1"));
-    BigDecimal totalFine = BigDecimal.ZERO;
-    
-    int daysWithFine = daysOverdue - gracePeriod;
-    
-    for (int day = 1; day <= daysWithFine; day++) {
-        BigDecimal multiplier;
-        if (day <= 5) {
-            multiplier = new BigDecimal("1.0");      // Days 6-10
-        } else if (day <= 15) {
-            multiplier = new BigDecimal("1.5");      // Days 11-20
-        } else {
-            multiplier = new BigDecimal("2.0");      // Days 21+
-        }
-        totalFine = totalFine.add(baseFine.multiply(multiplier));
-    }
-    
-    // Cap at 2x rental price
-    BigDecimal maxFine = rentalPrice.multiply(new BigDecimal("2.0"));
-    return totalFine.min(maxFine);
-}
+| Сценарий | Действие с депозитом |
+|----------|---------------------|
+| **Возврат без просрочки** | Холдирование депозита **Release** (полное снятие блокировки, деньги возвращаются на карту) |
+| **Возврат с просрочкой, штраф < депозит** | Холдирование депозита **Capture** на сумму штрафа → остаток **Release** |
+| **Возврат с просрочкой, штраф >= депозит** | Холдирование депозита **Capture** полностью → разница начисляется в `user_debt` |
+| **CASH оплата** | Депозит не холдировался → при штрафе пользователь оплачивает наличными, админ подтверждает → если не оплачивает → штраф в `user_debt` |
+
+**Событийный флоу (CARD):**
+```
+1. Admin подтверждает возврат → Book Service публикует: ReturnConfirmed {rental_id, actual_return_date}
+2. Book Service рассчитывает штраф
+3. Если штраф > 0:
+   → Book Service публикует: FineChargeRequested {rental_id, payment_intent_id, fine_amount, deposit_amount}
+   → Payment Service слушает:
+     - Если fine_amount <= deposit_amount: Capture fine_amount, Release остаток
+     - Если fine_amount > deposit_amount: Capture deposit_amount, разницу → Book Service начисляет в user_debt
+   → Payment Service публикует: FineChargeProcessed {rental_id, captured_amount, released_amount, debt_amount}
+   → Book Service слушает → обновляет fine_status, user_debt
+4. Если штраф = 0:
+   → Book Service публикует: DepositReleaseRequested {payment_intent_id, deposit_amount}
+   → Payment Service слушает → Release всего холдирования
+   → Payment Service публикует: DepositReleased {payment_intent_id}
 ```
 
-### 6.2 Fine Charging Process
+#### 4.4.3 Бронирование физической книги
+- Если `physical_inventory = 0`, пользователь может зарезервировать книгу
+- Создаётся запись в `reservations` со статусом `WAITING`
+- Когда книга возвращается (админ подтверждает возврат):
+  - Система проверяет очередь бронирований
+  - Первому в очереди: статус → `READY`
+  - `ready_at = current_time`
+  - `expires_at = ready_at + 24 часа`
+  - Отправляется уведомление: «Книга ждёт вас, заберите за 24 часа»
+- Если пользователь не забрал за 24 часа:
+  - Статус → `EXPIRED`
+  - Уведомление следующему в очереди
+- Когда пользователь приходит за книгой:
+  - Админ подтверждает выдачу
+  - `physical_inventory = physical_inventory - 1`
+  - Создаётся аренда
 
-**For Cash Payments:**
-1. User returns the book to the library
-2. Admin confirms return in admin panel
-3. System calculates total fine based on days overdue
-4. Admin displays fine amount to user
-5. User pays fine in cash
-6. Admin marks fine as PAID in the system
-7. Return is fully processed
+### 4.5 Система штрафов
 
-**For Card Payments:**
-1. User returns the book to the library
-2. Admin confirms return in admin panel
-3. System calculates total fine based on days overdue
-4. System attempts to charge the full fine amount to user's saved card
-5. If charge succeeds:
-   - Fine is marked as PAID
-   - Transaction is recorded
-   - Remaining deposit (if any) is refunded
-   - Return is fully processed
-6. If charge fails due to insufficient funds:
-   - Fine payment method is automatically switched from CARD to CASH
-   - Fine status becomes PENDING_CASH
-   - User is notified via email about the failed card charge and the switch to cash payment
-   - User has two options to pay:
-     a. **Pay in cash at the library**: User visits the library, pays the fine in cash, admin confirms payment in the system
-     b. **Update payment method in profile**: User logs into their account, adds/updates a payment method with sufficient funds, and triggers payment from their profile
-   - User cannot rent new books until fine is paid
-7. If charge fails for other reasons (expired card, blocked card, etc.):
-   - Same fallback process as insufficient funds
-   - User is notified with the specific error reason
+#### 4.5.1 Алгоритм расчёта
 
-### 6.3 Fine Calculation Examples
+```
+Grace Period: 5 дней (штраф = 0, только напоминания)
 
-| Rental Price | Days Overdue | Fine Amount | Notes |
-|--------------|--------------|-------------|-------|
-| $10.00 | 3 | $0.00 | Within grace period |
-| $10.00 | 5 | $0.00 | Last day of grace period |
-| $10.00 | 6 | $1.00 | First day of fine |
-| $10.00 | 10 | $5.00 | 5 days at 1.0x |
-| $10.00 | 15 | $12.50 | 5 days at 1.0x + 5 days at 1.5x |
-| $10.00 | 20 | $20.00 | 5 days at 1.0x + 10 days at 1.5x |
-| $10.00 | 25 | $20.00 | Capped at 2x rental price |
+День 6+:
+  daily_fine = price_purchase * 0.02  (2% от стоимости покупки в день)
+
+  Если days_overdue <= 10:
+    multiplier = 1.0
+  Если days_overdue <= 20:
+    multiplier = 1.5
+  Если days_overdue > 20:
+    multiplier = 2.0
+
+  total_fine = daily_fine * (days_overdue - 5) * multiplier
+
+Max Cap: total_fine НЕ МОЖЕТ превышать price_purchase (100% стоимости книги)
+
+Если total_fine >= price_purchase:
+  - Книга помечается как LOST
+  - Списывается полная стоимость книги (price_purchase)
+  - physical_inventory = physical_inventory + 1
+  - digital_licenses = digital_licenses + 1 (если не -1)
+  - Аренда закрывается со статусом LOST
+```
+
+#### 4.5.2 Примеры расчёта (в тенге)
+
+| Цена покупки | Дней просрочки | Расчёт | Итого штраф |
+|--------------|----------------|--------|-------------|
+| 5 000 ₸ | 3 | Grace period | 0 ₸ |
+| 5 000 ₸ | 5 | Grace period | 0 ₸ |
+| 5 000 ₸ | 6 | 100 × 1 × 1.0 | 100 ₸ |
+| 5 000 ₸ | 10 | 100 × 5 × 1.0 | 500 ₸ |
+| 5 000 ₸ | 15 | 100 × 10 × 1.5 | 1 500 ₸ |
+| 5 000 ₸ | 20 | 100 × 15 × 1.5 | 2 250 ₸ |
+| 5 000 ₸ | 25 | 100 × 20 × 2.0 | 4 000 ₸ |
+| 5 000 ₸ | 30 | Cap reached | 5 000 ₸ (максимум) |
+
+#### 4.5.3 Оплата штрафов
+
+**При возврате (физическая книга):**
+1. Админ подтверждает возврат
+2. Система рассчитывает штраф
+3. Если штраф = 0:
+   - Холдирование снимается полностью (Release)
+   - Депозит возвращается
+4. Если штраф > 0:
+   - **CARD**: Штраф списывается из заблокированных средств (pre-authorization capture)
+     - Если холдирования достаточно: списывается штраф, остаток возвращается
+     - Если холдирования недостаточно: разница начисляется в `user_debt`
+   - **CASH**:
+     - Пользователь оплачивает штраф наличными
+     - Админ подтверждает оплату в панели
+     - Если пользователь не оплачивает: штраф начисляется в `user_debt`
+
+**Внутренний долг (`user_debt`):**
+- Если `total_debt > 0`:
+  - Пользователь не может арендовать новые книги
+  - Пользователь не может скачивать PDF
+  - Пользователь видит баланс задолженности в личном кабинете
+- Пользователь может погасить долг:
+  - Оплатить онлайн (CARD) из личного кабинета → Book Service публикует `DebtPaymentRequested` → Payment Service обрабатывает → публикует `DebtPaymentCompleted` → Book Service обновляет `user_debt`
+  - Оплатить наличными в библиотеке (админ подтверждает)
+- При `total_debt = 0`: блокировка снимается автоматически
+
+#### 4.5.4 Уведомления о просрочке
+
+| День | Действие |
+|------|----------|
+| 1-5 | Ежедневное email-напоминание: «Пожалуйста, верните книгу. Штраф пока не начислен.» |
+| 6 | Email: «Начислен штраф: X ₸. Верните книгу как можно скорее.» |
+| 10 | Email: «Штраф увеличился до X ₸.» |
+| 15 | Email: «Штраф: X ₸. Ваш аккаунт будет заблокирован при достижении лимита.» |
+| 20 | Email: «Штраф: X ₸. Критическая просрочка.» |
+| 25+ | Email: «Книга будет помечена как утеряна. Штраф достигнет стоимости книги.» |
+| Cap reached | Email: «Книга помечена как утеряна. Списана стоимость: X ₸.» |
+
+### 4.6 Анти-пиратская система PDF
+
+#### 4.6.1 Генерация защищённой копии
+При скачивании PDF (только при покупке):
+1. Проверяется `download_count < max_downloads`
+2. Если `watermarked_file_url` уже существует в `pdf_copies` → отдаётся готовый файл из S3
+3. Если файла нет → генерируется персонализированная копия:
+   - Генерируется уникальный `anti_piracy_code`: `LIB-{userId}-{bookId}-{timestamp}-{randomHash}`
+   - **Видимый водяной знак** на каждой странице: email, имя, anti-piracy code
+   - **Невидимые метаданные** в свойствах PDF: anti-piracy code, timestamp, user ID
+   - **Скрытый текстовый слой**: anti-piracy code повторяется через каждые N страниц
+4. Сгенерированный PDF загружается в S3/MinIO
+5. `watermarked_file_url` записывается в `pdf_copies`
+6. `pdf_file_hash` (SHA-256) вычисляется и сохраняется
+7. `download_count = download_count + 1`
+
+#### 4.6.2 Ограничения скачивания
+- **Аренда**: скачивание запрещено (`max_downloads = 0`), только онлайн-чтение
+- **Покупка**: максимум 1 скачивание (`max_downloads = 1`)
+- Готовый PDF кешируется в S3 — повторное скачивание не требует регенерации
+
+#### 4.6.3 Идентификация пиратской копии
+1. Админ загружает найденный пиратский PDF
+2. Система извлекает anti-piracy code из метаданных/скрытого слоя
+3. Или вычисляет hash и сравнивает с `pdf_file_hash`
+4. Находит запись в `pdf_copies` по коду
+5. Определяется пользователь (`user_id`)
+6. Запись получает статус `FLAGGED` с причиной
+7. Админ видит информацию о пользователе
+
+### 4.7 Отзывы и рейтинги
+
+#### 4.7.1 Создание отзыва
+- Только пользователи с историей аренды/покупки данной книги могут оставить отзыв
+- Оценка: 1-5 звёзд
+- Текст рецензии (опционально)
+- Статус: `PENDING` (ожидает модерации)
+
+#### 4.7.2 Модерация (Admin)
+- Админ видит все отзывы со статусом `PENDING`
+- Может: `APPROVED` (публикуется) или `REJECTED` (удаляется)
+
+#### 4.7.3 Отображение
+- Средний рейтинг на странице книги
+- Список утверждённых отзывов
+
+### 4.8 Закладки и прогресс чтения
+
+#### 4.8.1 Прогресс чтения
+- При чтении онлайн система сохраняет `last_page`
+- При повторном открытии: переход на последнюю страницу
+- Прогресс: «Страница X из Y»
+
+#### 4.8.2 Закладки
+- Пользователь создаёт закладку на любой странице
+- Опциональная заметка
+- Список закладок в личном кабинете
+- Быстрый переход из ридера
+
+### 4.9 Wishlist (Список желаний)
+
+- Пользователь добавляет книгу в wishlist
+- Если книга становится доступной (`physical_inventory > 0` или `digital_licenses > 0`):
+  - Отправляется уведомление всем пользователям в wishlist
+  - `notification_sent = true`
+- Пользователь может удалить книгу из wishlist
+
+### 4.10 Промокоды
+
+- Админ создаёт промокоды:
+  - Тип скидки: процент (%) или фиксированная сумма (тенге)
+  - Применение: аренда, покупка, или оба
+  - Лимит использований
+  - Срок действия
+- Пользователь вводит промокод при оформлении аренды/покупки
+- Система валидирует:
+  - Промокод существует и активен
+  - Срок действия не истёк
+  - Лимит использований не превышен
+  - Промокод применим к данному типу операции
+- Скидка применяется к итоговой сумме
+- Запись в `promo_code_usages` для аналитики
+- `used_count` в `promo_codes` инкрементируется
+
+### 4.11 Удаление пользователей (GDPR / Anonymization)
+
+При запросе на удаление аккаунта:
+- **Hard Delete невозможен** — на пользователе висят rentals, fines, purchases
+- **Anonymization:**
+  - `users.email` → `deleted_{uuid}@deleted.local`
+  - `users.username` → `deleted_user_{uuid}`
+  - `users.first_name`, `users.last_name`, `users.phone` → очищаются
+  - `users.password_hash` → заменяется на случайный хеш
+  - Все персональные данные удаляются
+- Записи в `rentals`, `fines`, `purchases` **сохраняются** для финансовой отчётности
+- `user_debt` сохраняется до полного погашения
+- Анонимизация выполняется асинхронно через событие `UserDeletionRequested`
 
 ---
 
-## 7. State Diagrams
+## 5. Личный кабинет пользователя
 
-### 7.1 Rental Lifecycle
+Описание личного кабинета вынесено в отдельный файл: [User.md](./User.md)
+
+### Краткое содержание
+- Профиль, Мои книги, История чтений
+- Закладки, Штрафы и задолженность
+- Wishlist, Бронирования
+- Настройки уведомлений, Отзывы
+- Онлайн-ридер с heartbeat
+
+---
+
+## 6. Админ-панель
+
+Описание админ-панели вынесено в отдельный файл: [Admin.md](../../Library_Documentation/Library_Documentation/Admin.md)
+
+### Краткое содержание
+- Управление книгами, пользователями
+- Управление арендами, возвратами, покупками
+- Управление штрафами, контентом
+- Аналитика и отчёты
+- Инвентаризация
+
+---
+
+## 7. Технические схемы
+
+### 7.1 Схема аренды цифровой книги (CARD) — Event-Driven
 
 ```
-[Created] → [Pending Confirmation] → [Active] → [Overdue] → [Returned]
-                    ↓                      ↓
-              [Cancelled]           [Fine Applied]
+┌──────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│  User    │────>│ Book Service │────>│  RabbitMQ    │────>│Payment Service│
+│          │     │              │     │  Exchange    │     │              │
+│          │<────│              │<────│              │<────│              │
+└──────────┘     │              │     │              │     │              │
+                 │ 1. Проверка доступности           │     │              │
+                 │ 2. Проверка debt пользователя     │     │              │
+                 │ 3. SELECT ... FOR UPDATE (book)   │     │              │
+                 │ 4. Создание Rental (PENDING)      │     │              │
+                 │ 5. Публикация: RentCreated        │────>│              │
+                 │              │                    │     │ 6. Создание   │
+                 │              │                    │     │    invoice    │
+                 │              │                    │     │ 7. Pre-auth   │
+                 │              │                    │     │    в банке    │
+                 │              │                    │     │ 8. Публикация:│
+                 │              │                    │<────│ PaymentAuth   │
+                 │ 9. digital_licenses - 1           │     │              │
+                 │ 10. Status → ACTIVE               │     │              │
+                 │ 11. Создание reading_session      │     │              │
+                 │ 12. Публикация: RentActivated     │────>│              │
+                 ▼              ▼                    ▼     ▼              ▼
+          ┌─────────────────────────────────────────────────────────────┐
+          │              Book Service Database                          │
+          │  - books (digital_licenses - 1, version + 1)               │
+          │  - rentals (status = ACTIVE, payment_intent_id)            │
+          │  - reading_sessions                                        │
+          └─────────────────────────────────────────────────────────────┘
+
+          ┌─────────────────────────────────────────────────────────────┐
+          │              Payment Service Database                       │
+          │  - payment_intents (rental_id, amount, status)             │
+          │  - transactions                                            │
+          └─────────────────────────────────────────────────────────────┘
 ```
 
-### 7.2 Purchase Lifecycle
+### 7.2 Схема аренды физической книги (CASH) — Event-Driven
 
 ```
-[Created] → [Pending Payment] → [Completed] → [Access Granted]
-                    ↓
-              [Cancelled]
+┌──────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────────┐
+│  User    │────>│ Book Service │────>│  RabbitMQ    │────>│Notification Svc  │
+│          │     │              │     │  Exchange    │     │                  │
+│          │<────│              │     │              │     │                  │
+│  (Receipt)│    │              │     │              │     │                  │
+└──────────┘     │              │     │              │     │                  │
+                 │ 1. Проверка доступности           │     │                  │
+                 │ 2. Проверка debt пользователя     │     │                  │
+                 │ 3. SELECT ... FOR UPDATE (book)   │     │                  │
+                 │ 4. Создание Rental (PENDING_CONF) │     │                  │
+                 │ 5. Генерация receipt_code         │     │                  │
+                 │ 6. Публикация: RentalReceiptReady │────>│                  │
+                 │              │                    │     │ 7. Отправка      │
+                 │              │                    │     │    email с чеком │
+                 ▼              ▼                    ▼     ▼                  ▼
+          ┌─────────────────────────────────────────────────────────────┐
+          │              Book Service Database                          │
+          │  - books (physical_inventory, version + 1)                 │
+          │  - rentals (status = PENDING_CONFIRMATION)                 │
+          └─────────────────────────────────────────────────────────────┘
+
+--- Admin Confirmation ---
+
+┌──────────┐     ┌──────────────┐     ┌──────────────────┐
+│  Admin   │────>│ Book Service │────>│  Database        │
+│ (Scan QR)│     │              │     │                  │
+│          │     │ 1. Найти rental по receipt_code       │
+│          │     │ 2. physical_inventory - 1             │
+│          │     │ 3. Status → ACTIVE                    │
+│          │     │ 4. is_receipt_confirmed = true        │
+│          │     │ 5. Публикация: RentActivated          │
+└──────────┘     └──────────────┘     └──────────────────┘
 ```
 
-### 7.3 Book Availability
+### 7.3 Схема возврата физической книги — Event-Driven
 
 ```
-[Available] ←→ [Unavailable]
-     ↓
-[Out of Stock] (stockCount = 0)
+┌──────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│  Admin   │────>│ Book Service │────>│  RabbitMQ    │────>│Payment Svc   │
+│ (Scan QR)│     │              │     │  Exchange    │     │              │
+│          │     │              │     │              │     │              │
+│          │<────│              │<────│              │<────│              │
+│  Result  │     │              │     │              │     │              │
+└──────────┘     │              │     │              │     │              │
+                 │ 1. Найти rental по коду           │     │              │
+                 │ 2. Рассчитать штраф (если есть)   │     │              │
+                 │ 3. physical_inventory + 1         │     │              │
+                 │ 4. actual_return_date = now       │     │              │
+                 │ 5. Status → RETURNED              │     │              │
+                 │ 6. Если штраф > 0:                │     │              │
+                 │    Публикация: FineChargeRequested│────>│              │
+                 │    → Payment: Capture/Release     │     │              │
+                 │    → Ответ: FineChargeProcessed   │<────│              │
+                 │ 7. Если штраф = 0:                │     │              │
+                 │    Публикация: DepositReleaseReq  │────>│              │
+                 │    → Payment: Release             │     │              │
+                 │    → Ответ: DepositReleased       │<────│              │
+                 │ 8. Обновить fine_status, user_debt│     │              │
+                 │              │                    │     │              │
+                 ▼              ▼                    ▼     ▼              ▼
+          ┌─────────────────────────────────────────────────────────────┐
+          │              Book Service Database                          │
+          │  - books (physical_inventory + 1, version + 1)             │
+          │  - rentals (status = RETURNED, actual_return_date)         │
+          │  - fines (если есть штраф)                                 │
+          │  - user_debt (если штраф > депозит)                        │
+          └─────────────────────────────────────────────────────────────┘
+```
+
+### 7.4 Scheduled Job: Проверка просроченных аренд
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Scheduled Job (Daily)                     │
+│                    @Scheduled(cron = "0 0 3 * * *")          │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+          ┌────────────────────────────────┐
+          │  Найти все аренды где:         │
+          │  status = ACTIVE               │
+          │  AND end_date < current_date   │
+          │  (SELECT ... FOR UPDATE)       │
+          └────────────────┬───────────────┘
+                           │
+                           ▼
+          ┌────────────────────────────────┐
+          │  Для каждой просроченной:      │
+          │                                │
+          │  1. Рассчитать days_overdue    │
+          │  2. Рассчитать fine_amount     │
+          │  3. Если fine >= price:        │
+          │     → Status = LOST            │
+          │     → Списать стоимость        │
+          │     → inventory + 1            │
+          │     → reading_sessions close   │
+          │  4. Иначе:                     │
+          │     → Status = OVERDUE         │
+          │     → Создать Fine запись      │
+          │     → Начислить в user_debt    │
+          │  5. Отправить уведомление      │
+          │     → Публикация в RabbitMQ    │
+          └────────────────┬───────────────┘
+                           │
+                           ▼
+          ┌────────────────────────────────┐
+          │  RabbitMQ Queue                │
+          │  → Email Notification Service  │
+          │  → Fine Calculation Service    │
+          └────────────────────────────────┘
+```
+
+### 7.5 Схема покупки цифровой книги (только CARD) — Event-Driven
+
+```
+┌──────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│  User    │────>│ Book Service │────>│  RabbitMQ    │────>│Payment Svc   │
+│          │     │              │     │  Exchange    │     │              │
+│          │<────│              │<────│              │<────│              │
+└──────────┘     │              │     │              │     │              │
+                 │ 1. Проверка доступности           │     │              │
+                 │ 2. Проверка debt пользователя     │     │              │
+                 │ 3. Проверка: нет покупки этой книги│    │              │
+                 │ 4. Создание Purchase (PENDING)    │     │              │
+                 │ 5. Публикация: PurchaseCreated    │────>│              │
+                 │              │                    │     │ 6. Создание   │
+                 │              │                    │     │    invoice    │
+                 │              │                    │     │ 7. Списание   │
+                 │              │                    │     │    price      │
+                 │              │                    │     │ 8. Публикация:│
+                 │              │                    │<────│ PaymentComp   │
+                 │ 9. Status → COMPLETED             │     │              │
+                 │ 10. Генерация PdfCopy             │     │              │
+                 │ 11. PDF → S3/MinIO                │     │              │
+                 │ 12. watermarked_file_url → БД     │     │              │
+                 │ 13. total_purchases_count + 1     │     │              │
+                 │ 14. Публикация: PurchaseCompleted │────>│              │
+                 ▼              ▼                    ▼     ▼              ▼
+          ┌─────────────────────────────────────────────────────────────┐
+          │              Book Service Database                          │
+          │  - purchases (status = COMPLETED)                          │
+          │  - pdf_copies (anti_piracy_code, watermarked_file_url)     │
+          │  - books (total_purchases_count + 1)                       │
+          └─────────────────────────────────────────────────────────────┘
+
+Примечание: Покупка цифровой версии доступна ТОЛЬКО через карту (CARD).
+Оплата наличными не поддерживается — цифровой товар доставляется мгновенно.
+```
+
+### 7.6 Схема бронирования физической книги
+
+```
+┌──────────┐     ┌──────────────┐     ┌──────────────────┐
+│  User    │────>│ Book Service │────>│  Database        │
+│          │     │              │     │                  │
+│  (Reserve)│    │ 1. Проверить inventory = 0           │
+│          │     │ 2. Создать Reservation (WAITING)     │
+│          │     │ 3. Добавить в очередь                │
+└──────────┘     └──────────────┘     └──────────────────┘
+
+--- Book Returned ---
+
+┌──────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────────┐
+│  Admin   │────>│ Book Service │────>│  RabbitMQ    │────>│Notification Svc  │
+│ (Confirm  │     │              │     │  Exchange    │     │                  │
+│  Return)  │     │ 1. physical_inventory + 1        │     │                  │
+│          │     │ 2. Проверить reservations         │     │                  │
+│          │     │ 3. Если есть WAITING:             │     │                  │
+│          │     │    → Первый → READY               │     │                  │
+│          │     │    → ready_at = now               │     │                  │
+│          │     │    → expires_at = now + 24h       │     │                  │
+│          │     │ 4. Публикация: ReservationReady   │────>│                  │
+│          │     │                                    │     │ 5. Отправить     │
+│          │     │                                    │     │    уведомление   │
+└──────────┘     └──────────────┘     └──────────────┘     └──────────────────┘
+
+--- Reservation Expired ---
+
+┌─────────────────────────────────────┐
+│  Scheduled Job (Hourly)             │
+│                                     │
+│  Найти reservations где:            │
+│  status = READY                     │
+│  AND expires_at < current_time      │
+│                                     │
+│  Для каждой:                        │
+│  → Status = EXPIRED                 │
+│  → Следующий WAITING → READY        │
+│  → Отправить уведомление            │
+└─────────────────────────────────────┘
+```
+
+### 7.7 Схема скачивания PDF с анти-пиратской защитой
+
+```
+┌──────────┐     ┌──────────────┐     ┌──────────────────┐     ┌──────────┐
+│  User    │────>│ Book Service │────>│  S3 / MinIO      │────>│  User    │
+│ (Download)│    │              │     │  Object Storage  │     │ (PDF)    │
+│          │     │ 1. Проверить purchase               │     │          │
+│          │     │ 2. Проверить download_count         │     │          │
+│          │     │    < max_downloads                  │     │          │
+│          │     │ 3. Если watermarked_file_url есть:  │     │          │
+│          │     │    → Отдать URL из S3               │     │          │
+│          │     │ 4. Если файла нет:                  │     │          │
+│          │     │    → Сгенерировать anti_piracy_code │     │          │
+│          │     │    → Применить водяные знаки        │     │          │
+│          │     │    → Вычислить SHA-256 hash         │     │          │
+│          │     │    → Загрузить в S3                 │     │          │
+│          │     │    → Сохранить URL и hash в БД      │     │          │
+│          │     │    → download_count + 1             │     │          │
+│          │     │    → Отдать URL из S3               │     │          │
+│          │<────│              │     │                  │     │          │
+└──────────┘     └──────────────┘     └──────────────────┘     └──────────┘
+                           │
+                           ▼
+          ┌────────────────────────────────┐
+          │     Book Service Database      │
+          │ - pdf_copies                   │
+          │   - anti_piracy_code           │
+          │   - watermarked_file_url       │
+          │   - pdf_file_hash              │
+          │   - visible_watermark          │
+          │   - invisible_metadata         │
+          │   - download_count             │
+          └────────────────────────────────┘
+```
+
+### 7.8 Схема удаления пользователя (GDPR Anonymization)
+
+```
+┌──────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│  User    │────>│ Book Service │────>│  RabbitMQ    │────>│Notification Svc│
+│ (Delete  │     │              │     │  Exchange    │     │              │
+│  Request)│     │              │     │              │     │              │
+│          │     │ 1. Валидация запроса             │     │              │
+│          │     │ 2. Публикация: UserDeletionReq   │────>│              │
+│          │     │ 3. Анонимизация users:           │     │              │
+│          │     │    - email → deleted_{uuid}@...  │     │              │
+│          │     │    - username → deleted_user_... │     │              │
+│          │     │    - name, phone → NULL          │     │              │
+│          │     │    - password → random hash      │     │              │
+│          │     │ 4. rentals, fines, purchases     │     │              │
+│          │     │    → СОХРАНЯЮТСЯ (отчётность)    │     │              │
+│          │     │ 5. user_debt → сохраняется       │     │              │
+│          │<────│ 6. Ответ: UserAnonymized         │     │              │
+└──────────┘     └──────────────┘     └──────────────┘     └──────────────┘
 ```
 
 ---
 
-## 8. Security Considerations
+## 8. Очереди сообщений (RabbitMQ)
 
-### 8.1 Access Control
-- Book viewing: Public (no authentication required)
-- Book creation/editing/deletion: Admin only
-- Book renting/purchasing: Authenticated users only
-- Return confirmation: Admin only
-- PDF access: Based on active rental or purchase record
-- PDF download: Purchased books only
+### 8.1 Exchange: `library.book.events`
 
-### 8.2 Data Protection
-- PDFs stored outside public web root
-- Access tokens validated before PDF serving
-- Receipt codes are unique and non-guessable
-- Payment information encrypted at rest
-- **Anti-Piracy Protection**:
-  - Each downloaded PDF contains a unique identifier code
-  - Code is embedded visibly (watermark) and invisibly (metadata)
-  - All codes are stored in database linked to specific users
-  - Pirated copies can be traced back to the original downloader
-  - PDF file hashes stored to verify file integrity
-- **Payment Fallback Security**:
-  - When card charge fails, payment method switch is logged
-  - User must authenticate to pay fine from profile
-  - Admin must confirm cash payments in person
+| Queue | Routing Key | Описание |
+|-------|-------------|----------|
+| `library.payment.rent.created` | `rent.created` | Book → Payment: запрос pre-auth для аренды |
+| `library.payment.purchase.created` | `purchase.created` | Book → Payment: запрос оплаты покупки |
+| `library.payment.fine.charge` | `fine.charge` | Book → Payment: списание штрафа из депозита |
+| `library.payment.deposit.release` | `deposit.release` | Book → Payment: снятие холдирования депозита |
+| `library.payment.debt.payment` | `debt.payment` | Book → Payment: оплата задолженности |
 
-### 8.3 Audit Trail
-- All admin actions logged
-- Rental/purchase history immutable
-- Fine calculations logged with timestamps
-- Payment transactions recorded
-- PDF download history with unique codes
-- Anti-piracy code generation and verification logged
+### 8.2 Exchange: `library.payment.events`
 
----
+| Queue | Routing Key | Описание |
+|-------|-------------|----------|
+| `library.book.payment.authorized` | `payment.authorized` | Payment → Book: pre-auth успешен |
+| `library.book.payment.completed` | `payment.completed` | Payment → Book: оплата завершена |
+| `library.book.payment.failed` | `payment.failed` | Payment → Book: оплата отклонена |
+| `library.book.fine.charge.processed` | `fine.charge.processed` | Payment → Book: штраф обработан |
+| `library.book.deposit.released` | `deposit.released` | Payment → Book: депозит возвращён |
+| `library.book.debt.payment.completed` | `debt.payment.completed` | Payment → Book: долг погашен |
 
-## 9. Integration Points
+### 8.3 Exchange: `library.notification.events`
 
-### 9.1 External Services
-- **Payment Gateway**: For card payments (Stripe, PayPal, etc.)
-- **Email Service**: For receipts, notifications, reminders
-- **PDF Storage**: Secure cloud storage (S3, etc.)
-- **Barcode Generator**: For receipt generation
-- **PDF Watermarking Service**: For anti-piracy code embedding
-- **Code Generator**: For unique anti-piracy code generation
-
-### 9.2 Internal Services
-- **Notification Service**: For email reminders and notifications
-- **Cache Service**: For book data caching
-- **Scheduled Jobs**: For overdue detection and fine calculation
-- **Message Queue**: For async operations (receipt generation, notifications)
+| Queue | Routing Key | Описание |
+|-------|-------------|----------|
+| `library.notification.rent.activated` | `rent.activated` | Book → Notification: аренда активирована |
+| `library.notification.receipt.ready` | `rental.receipt` | Book → Notification: чек аренды готов |
+| `library.notification.purchase.receipt` | `purchase.receipt` | Book → Notification: чек покупки готов |
+| `library.notification.overdue.reminder` | `overdue.reminder` | Book → Notification: напоминание о просрочке |
+| `library.notification.fine.alert` | `fine.notification` | Book → Notification: уведомление о штрафе |
+| `library.notification.availability.alert` | `availability.alert` | Book → Notification: книга стала доступна (wishlist) |
+| `library.notification.reservation.ready` | `reservation.ready` | Book → Notification: бронирование готово |
+| `library.notification.return.confirmation` | `return.confirmation` | Book → Notification: подтверждение возврата |
+| `library.notification.user.anonymized` | `user.anonymized` | Book → Notification: пользователь анонимизирован |
 
 ---
 
-## 10. Testing Strategy
+## 9. Защита от Race Condition
 
-### 10.1 Unit Tests
-- Fine calculation algorithm
-- Fine charging on return confirmation
-- Fallback to cash on card failure
-- Stock count management
-- Availability status calculation
-- Rental period validation
-- Anti-piracy code generation
-- PDF watermarking logic
-- Code uniqueness validation
+### 9.1 Пессимистичная блокировка
 
-### 10.2 Integration Tests
-- Rental flow (create, activate, return)
-- Purchase flow (create, confirm, access)
-- Payment processing (mock gateway)
-- Email notification delivery
-- Fine charging on return confirmation (card and cash)
-- Fallback to cash payment when card charge fails
-- User paying fine from profile with updated card
-- Admin confirming cash payment for failed card charge
-- PDF download with anti-piracy code
-- Anti-piracy code extraction and user identification
+При аренде/покупке последней копии:
+```sql
+SELECT * FROM books WHERE id = ? FOR UPDATE;
+-- Проверка physical_inventory / digital_licenses
+-- Обновление с проверкой что значение > 0
+UPDATE books SET physical_inventory = physical_inventory - 1, version = version + 1 WHERE id = ?;
+```
 
-### 10.3 End-to-End Tests
-- Complete rental lifecycle
-- Complete purchase lifecycle
-- Overdue detection and fine application
-- Admin return confirmation with fine charging
-- Card charge failure and fallback to cash payment
-- User updating payment method and paying fine from profile
-- Admin confirming cash payment after failed card charge
-- PDF download and anti-piracy code verification
-- Pirated copy identification workflow
+### 9.2 Optimistic Locking
+
+Поле `version` в таблице `books`:
+```sql
+UPDATE books SET physical_inventory = ?, version = version + 1
+WHERE id = ? AND version = ?;
+-- Если 0 строк обновлено → конфликт, повторить операцию
+```
+
+### 9.3 Redis (опционально)
+
+Для высоконагруженных операций:
+```
+DECR book:{id}:inventory
+Если результат < 0 → INCR (откат) → ошибка "нет в наличии"
+```
+
+---
+
+## 10. Индексы для частых запросов
+
+### 10.1 Критичные индексы
+
+| Таблица | Поле(я) | Тип | Для чего |
+|---------|---------|-----|----------|
+| `books` | `isbn` | UNIQUE | Проверка уникальности ISBN |
+| `books` | `title` | B-Tree | Поиск по названию |
+| `books` | `publication_year` | B-Tree | Фильтрация по году |
+| `books` | `is_active` | B-Tree | Фильтрация активных книг |
+| `rentals` | `user_id` | B-Tree | Аренды пользователя |
+| `rentals` | `book_id` | B-Tree | Аренды книги |
+| `rentals` | `status` | B-Tree | Фильтрация по статусу |
+| `rentals` | `end_date` | B-Tree | Поиск просроченных аренд |
+| `rentals` | `receipt_code` | UNIQUE | Поиск по штрих-коду |
+| `purchases` | `user_id` | B-Tree | Покупки пользователя |
+| `purchases` | `book_id` | B-Tree | Покупки книги |
+| `purchases` | `status` | B-Tree | Фильтрация по статусу |
+| `fines` | `rental_id` | B-Tree | Штрафы аренды |
+| `fines` | `user_id` | B-Tree | Штрафы пользователя |
+| `fines` | `status` | B-Tree | Фильтрация по статусу |
+| `pdf_copies` | `anti_piracy_code` | UNIQUE | Поиск по коду |
+| `pdf_copies` | `status` | B-Tree | Фильтрация по статусу |
+| `reservations` | `status` | B-Tree | Очередь бронирований |
+| `reservations` | `expires_at` | B-Tree | Поиск истёкших бронирований |
+| `reading_sessions` | `last_heartbeat` | B-Tree | Поиск неактивных сессий |
+| `reading_sessions` | `is_active` | B-Tree | Активные сессии |
+| `reviews` | `book_id` | B-Tree | Отзывы книги |
+| `reviews` | `status` | B-Tree | Модерация отзывов |
+| `wishlist` | `user_id, book_id` | COMPOSITE | Проверка наличия в wishlist |
+| `bookmarks` | `user_id, book_id` | COMPOSITE | Закладки пользователя |
+| `reading_progress` | `user_id, book_id` | COMPOSITE | Прогресс пользователя |
+| `promo_codes` | `code` | UNIQUE | Поиск промокода |
+| `promo_codes` | `is_active` | B-Tree | Фильтрация активных |
+| `promo_code_usages` | `promo_code_id` | B-Tree | Аналитика промокодов |
+| `book_authors` | `book_id, author_id` | COMPOSITE PK | Связь книга-автор |
+| `book_categories` | `book_id, category_id` | COMPOSITE PK | Связь книга-категория |
+| `authors` | `full_name` | B-Tree | Поиск авторов |
+| `categories` | `name` | UNIQUE | Уникальность категорий |
+
+---
+
+## 11. Валюта
+
+Все денежные суммы в системе указываются в **тенге (₸)**.
+
+| Операция | Пример суммы |
+|----------|-------------|
+| Аренда цифровой книги | 500 ₸ / 30 дней |
+| Аренда физической книги | 1 000 ₸ / 30 дней |
+| Покупка цифровой книги | 5 000 ₸ |
+| Покупка физической книги | 8 000 ₸ |
+| Залог | 2 000 ₸ |
+| Штраф за просрочку | 2% от стоимости покупки в день |
+| Максимальный штраф | 100% от стоимости покупки |
+
+---
+
+## 12. Статусы сущностей
+
+### 12.1 Rental Status
+
+```
+PENDING_PAYMENT → PENDING_CONFIRMATION → ACTIVE → OVERDUE → RETURNED
+                                              ↓
+                                            EXPIRED (digital auto)
+                                            LOST (cap reached)
+                                            CANCELLED
+```
+
+### 12.2 Purchase Status
+
+**DIGITAL purchase (только CARD):**
+```
+PENDING_PAYMENT → COMPLETED
+      ↓
+    CANCELLED
+```
+
+**PHYSICAL purchase (CARD или CASH):**
+```
+PENDING_PAYMENT → PENDING_CONFIRMATION → COMPLETED
+                      ↓
+                    CANCELLED
+```
+
+### 12.3 Fine Status
+
+```
+PENDING → PAID
+       → WAIVED
+```
+
+### 12.4 Reservation Status
+
+```
+WAITING → READY → EXPIRED
+       → CANCELLED
+```
+
+### 12.5 Review Status
+
+```
+PENDING → APPROVED
+       → REJECTED
+```
+
+### 12.6 Payment Intent Status (Payment Service)
+
+```
+CREATED → AUTHORIZED → CAPTURED
+               ↓
+           RELEASED
+               ↓
+           FAILED
+```
+
+---
+
+## 13. Правила и ограничения
+
+### 13.1 Блокировки пользователя
+
+Пользователь блокируется от:
+- Новых аренд
+- Скачивания PDF
+- Покупок (опционально)
+
+Причины блокировки:
+- `user_debt.total_debt > 0`
+- Есть активные просроченные аренды (`status = OVERDUE`)
+- Админ вручную забанил пользователя
+
+### 13.2 Ограничения на аренду
+
+- Нельзя арендовать книгу если:
+  - Пользователь заблокирован
+  - `physical_inventory = 0` (физическая)
+  - `digital_licenses = 0` (цифровая, если не -1)
+  - `is_available_for_rent = false`
+  - Уже есть активная аренда этой же книги
+
+### 13.3 Ограничения на покупку
+
+- Нельзя купить книгу если:
+  - Пользователь заблокирован (опционально)
+  - `physical_inventory = 0` (физическая)
+  - `is_available_for_purchase = false`
+  - Уже есть покупка этой же книги (цифровая)
+- **Цифровая версия** — оплата **только через карту (CARD)**, наличные не поддерживаются
+- **Физическая версия** — оплата через карту (CARD) или наличными (CASH)
+
+### 13.4 Ограничения на скачивание PDF
+
+- Только при покупке цифровой версии
+- Максимум 1 скачивание
+- При аренде — только онлайн-чтение
+- Готовый PDF кешируется в S3/MinIO
+
+### 13.5 Ограничения на отзывы
+
+- Только пользователи с историей аренды/покупки данной книги
+- Один отзыв на книгу от пользователя
+- Требуется модерация перед публикацией
+
+### 13.6 Транзакционность критичных операций
+
+| Операция | ACID гарантия |
+|----------|--------------|
+| Создание аренды + decrement inventory | Локальная транзакция Book Service |
+| Подтверждение возврата + increment inventory | Локальная транзакция Book Service |
+| Оплата через Payment Service | Saga-паттерн через события |
+| Начисление штрафа + update user_debt | Локальная транзакция Book Service |
+| Генерация PDF + запись в S3 | Компенсирующая транзакция при ошибке |
+
+### 13.7 Heartbeat правила
+
+- Интервал heartbeat: каждые 5 минут
+- Таймаут без heartbeat: 15 минут
+- При таймауте: `is_active = false`, сессия закрывается
+- Heartbeat не освобождает лицензию (аренда = время, а не сессия)
+- Heartbeat нужен для: аналитики, сохранения прогресса, обнаружения зависших сессий
